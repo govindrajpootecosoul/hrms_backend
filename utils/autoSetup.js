@@ -1,0 +1,52 @@
+const mysql = require('mysql2/promise');
+require('dotenv').config();
+
+async function autoSetupDatabase() {
+  const dbName = process.env.DB_NAME || 'worklytics_hrms';
+  
+  // Connect without database first
+  const connectionConfig = {
+    host: process.env.DB_HOST || '192.168.50.29',
+    port: process.env.DB_PORT || 3306,
+    user: process.env.DB_USER || 'apiuser',
+    password: process.env.DB_PASSWORD || 'Thrive@2910'
+  };
+
+  try {
+    console.log('🔧 Auto-setting up database...');
+    const connection = await mysql.createConnection(connectionConfig);
+    
+    // Create database if it doesn't exist (use query for DDL)
+    await connection.query(`CREATE DATABASE IF NOT EXISTS \`${dbName}\``);
+    console.log(`✅ Database "${dbName}" ready`);
+    
+    // Use the database (must use query, not execute)
+    await connection.query(`USE \`${dbName}\``);
+    
+    // Create users table if it doesn't exist
+    await connection.query(`
+      CREATE TABLE IF NOT EXISTS users (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        name VARCHAR(255) NOT NULL,
+        email VARCHAR(255) NOT NULL UNIQUE,
+        phone VARCHAR(20) NOT NULL,
+        role ENUM('admin', 'user') NOT NULL DEFAULT 'user',
+        password VARCHAR(255) NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        INDEX idx_email (email)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    `);
+    console.log('✅ Users table ready');
+    
+    await connection.end();
+    return true;
+  } catch (error) {
+    console.error('⚠️  Auto-setup failed:', error.message);
+    console.error('   You can manually run: npm run setup-db');
+    return false;
+  }
+}
+
+module.exports = autoSetupDatabase;
+
