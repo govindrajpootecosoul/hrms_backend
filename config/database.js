@@ -1,7 +1,7 @@
 const mysql = require('mysql2/promise');
 require('dotenv').config();
 
-const pool = mysql.createPool({
+const DB_CONFIG = {
   host: process.env.DB_HOST || '192.168.50.29',
   port: process.env.DB_PORT || 3306,
   user: process.env.DB_USER || 'apiuser',
@@ -9,29 +9,73 @@ const pool = mysql.createPool({
   database: process.env.DB_NAME || 'worklytics_hrms',
   waitForConnections: true,
   connectionLimit: process.env.DB_POOL_SIZE || 12,
-  queueLimit: 0
-});
+  queueLimit: 0,
+  connectTimeout: 10000 // 10 seconds connection timeout
+};
 
-// Test connection with better error handling
-pool.getConnection()
-  .then(connection => {
-    console.log('✅ Database connected successfully');
-    console.log(`   Host: ${process.env.DB_HOST || '192.168.50.29'}`);
-    console.log(`   User: ${process.env.DB_USER || 'apiuser'}`);
-    console.log(`   Database: ${process.env.DB_NAME || 'worklytics_hrms'}`);
-    connection.release();
-  })
-  .catch(err => {
-    console.error('❌ Database connection failed:', err.message);
-    console.error('\n💡 Troubleshooting steps:');
-    console.error('1. Make sure database "worklytics_hrms" exists in phpMyAdmin');
-    console.error('2. Verify user "apiuser" has access to database "worklytics_hrms"');
-    console.error('3. Grant remote access - Run SQL in phpMyAdmin:');
-    console.error('   GRANT ALL PRIVILEGES ON worklytics_hrms.* TO \'apiuser\'@\'%\' IDENTIFIED BY \'Thrive@2910\';');
-    console.error('   FLUSH PRIVILEGES;');
-    console.error('4. Check file: grant-access.sql for detailed SQL commands');
-    console.error('5. Verify MySQL server allows remote connections');
-  });
+const pool = mysql.createPool(DB_CONFIG);
+
+// Track connection status
+let isConnected = false;
+let connectionError = null;
+
+// Test connection with retry logic
+async function testConnection(retries = 3, delay = 2000) {
+  for (let i = 0; i < retries; i++) {
+    try {
+      const connection = await pool.getConnection();
+      console.log('✅ Database connected successfully');
+      console.log(`   Host: ${DB_CONFIG.host}`);
+      console.log(`   Port: ${DB_CONFIG.port}`);
+      console.log(`   User: ${DB_CONFIG.user}`);
+      console.log(`   Database: ${DB_CONFIG.database}`);
+      connection.release();
+      isConnected = true;
+      connectionError = null;
+      return true;
+    } catch (err) {
+      connectionError = err;
+      if (i < retries - 1) {
+        console.log(`⚠️  Connection attempt ${i + 1}/${retries} failed, retrying in ${delay/1000}s...`);
+        await new Promise(resolve => setTimeout(resolve, delay));
+      } else {
+        console.error('❌ Database connection failed after', retries, 'attempts');
+        console.error('   Error:', err.message);
+        console.error('\n💡 Troubleshooting steps:');
+        console.error('1. Check if MySQL server is running on', DB_CONFIG.host);
+        console.error('2. Verify network connectivity: ping', DB_CONFIG.host);
+        console.error('3. Check firewall settings - port', DB_CONFIG.port, 'should be open');
+        console.error('4. Verify MySQL user credentials in .env file');
+        console.error('5. Check MySQL bind-address configuration (should allow remote connections)');
+        console.error('6. Run: npm run test-connection (to test database connection)');
+        console.error('\n📝 Current Configuration:');
+        console.error('   DB_HOST:', DB_CONFIG.host);
+        console.error('   DB_PORT:', DB_CONFIG.port);
+        console.error('   DB_USER:', DB_CONFIG.user);
+        console.error('   DB_NAME:', DB_CONFIG.database);
+        isConnected = false;
+        return false;
+      }
+    }
+  }
+}
+
+// MySQL connection test disabled - MongoDB is now the primary database
+// Only test MySQL connection when explicitly needed by other portals
+// testConnection() is commented out to prevent startup errors
+
+// Helper function to check if database is available
+pool.isConnected = () => isConnected;
+pool.getConnectionError = () => connectionError;
+
+// Override getConnection to provide better error handling
+const originalGetConnection = pool.getConnection.bind(pool);
+pool.getConnection = async function() {
+  if (!isConnected && connectionError) {
+    throw new Error(`Database connection unavailable: ${connectionError.message}`);
+  }
+  return originalGetConnection();
+};
 
 module.exports = pool;
 

@@ -2,7 +2,9 @@ const express = require('express');
 const router = express.Router();
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
-const pool = require('../config/database');
+const { ObjectId } = require('mongodb');
+const pool = require('../../config/database');
+const { connectMongo, getUsersCollection, LOGIN_DB_NAME } = require('../../config/mongo');
 
 // Signup endpoint
 router.post('/signup', async (req, res) => {
@@ -97,6 +99,8 @@ router.post('/login', async (req, res) => {
   try {
     const { email, password } = req.body;
 
+    console.log('Login attempt for email:', email);
+
     // Validation
     if (!email || !password) {
       return res.status(400).json({
@@ -105,25 +109,27 @@ router.post('/login', async (req, res) => {
       });
     }
 
-    // Find user
-    const [users] = await pool.execute(
-      'SELECT id, name, email, phone, role, password FROM users WHERE email = ?',
-      [email]
-    );
+    // Connect to login database (ecosoul_project_tracker)
+    await connectMongo(LOGIN_DB_NAME);
+    const usersCol = getUsersCollection();
+    console.log(`[login] Querying users collection in database: ${LOGIN_DB_NAME}, email: ${email}`);
+    const user = await usersCol.findOne({ email });
 
-    if (users.length === 0) {
+    if (!user) {
+      console.log(`[login] User not found with email: ${email}`);
       return res.status(401).json({
         success: false,
         error: 'Invalid email or password'
       });
     }
 
-    const user = users[0];
+    console.log(`[login] User found: ${user.email}, employeeId: ${user.employeeId || 'N/A'}`);
 
     // Verify password
     const isPasswordValid = await bcrypt.compare(password, user.password);
 
     if (!isPasswordValid) {
+      console.log(`[login] Password mismatch for email: ${email}`);
       return res.status(401).json({
         success: false,
         error: 'Invalid email or password'
@@ -132,29 +138,45 @@ router.post('/login', async (req, res) => {
 
     // Generate JWT token
     const token = jwt.sign(
-      { userId: user.id, email: user.email, role: user.role },
+      {
+        userId: user._id?.toString(),
+        email: user.email,
+        role: user.role
+      },
       process.env.JWT_SECRET || 'your-secret-key-change-in-production',
       { expiresIn: '7d' }
     );
+
+    console.log('Login successful for user:', user.email);
 
     res.json({
       success: true,
       message: 'Login successful',
       token,
       user: {
-        id: user.id,
+        id: user._id?.toString(),
         name: user.name,
         email: user.email,
-        phone: user.phone,
-        role: user.role
+        role: user.role,
+        employeeId: user.employeeId,
+        department: user.department,
+        company: user.company,
+        isActive: user.isActive,
+        avatar: user.avatar
       }
     });
   } catch (error) {
     console.error('Login error:', error);
-    res.status(500).json({
-      success: false,
-      error: 'Internal server error'
-    });
+    console.error('Error stack:', error.stack);
+    
+    // Send proper error response
+    if (!res.headersSent) {
+      res.status(500).json({
+        success: false,
+        error: error.message || 'Internal server error',
+        details: process.env.NODE_ENV === 'development' ? error.stack : undefined
+      });
+    }
   }
 });
 
@@ -175,13 +197,13 @@ router.get('/verify', async (req, res) => {
       process.env.JWT_SECRET || 'your-secret-key-change-in-production'
     );
 
-    // Get user from database
-    const [users] = await pool.execute(
-      'SELECT id, name, email, phone, role FROM users WHERE id = ?',
-      [decoded.userId]
-    );
+    // Connect to login database (ecosoul_project_tracker)
+    await connectMongo(LOGIN_DB_NAME);
+    const usersCol = getUsersCollection();
 
-    if (users.length === 0) {
+    const user = await usersCol.findOne({ _id: new ObjectId(decoded.userId) });
+
+    if (!user) {
       return res.status(401).json({
         success: false,
         error: 'User not found'
@@ -190,7 +212,17 @@ router.get('/verify', async (req, res) => {
 
     res.json({
       success: true,
-      user: users[0]
+      user: {
+        id: user._id?.toString(),
+        name: user.name,
+        email: user.email,
+        role: user.role,
+        employeeId: user.employeeId,
+        department: user.department,
+        company: user.company,
+        isActive: user.isActive,
+        avatar: user.avatar
+      }
     });
   } catch (error) {
     res.status(401).json({
@@ -201,4 +233,5 @@ router.get('/verify', async (req, res) => {
 });
 
 module.exports = router;
+
 

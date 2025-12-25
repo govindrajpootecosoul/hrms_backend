@@ -9,12 +9,20 @@ async function autoSetupDatabase() {
     host: process.env.DB_HOST || '192.168.50.29',
     port: process.env.DB_PORT || 3306,
     user: process.env.DB_USER || 'apiuser',
-    password: process.env.DB_PASSWORD || 'Thrive@2910'
+    password: process.env.DB_PASSWORD || 'Thrive@2910',
+    connectTimeout: 10000 // 10 seconds timeout
   };
 
   try {
     console.log('🔧 Auto-setting up database...');
-    const connection = await mysql.createConnection(connectionConfig);
+    console.log(`   Connecting to ${connectionConfig.host}:${connectionConfig.port}...`);
+    
+    const connection = await Promise.race([
+      mysql.createConnection(connectionConfig),
+      new Promise((_, reject) => 
+        setTimeout(() => reject(new Error('Connection timeout after 10 seconds')), 10000)
+      )
+    ]);
     
     // Create database if it doesn't exist (use query for DDL)
     await connection.query(`CREATE DATABASE IF NOT EXISTS \`${dbName}\``);
@@ -42,8 +50,13 @@ async function autoSetupDatabase() {
     await connection.end();
     return true;
   } catch (error) {
-    console.error('⚠️  Auto-setup failed:', error.message);
-    console.error('   You can manually run: npm run setup-db');
+    if (error.code === 'ETIMEDOUT' || error.code === 'ECONNREFUSED') {
+      // Don't show error - MySQL is optional, MongoDB is primary for employee portal
+      console.log('ℹ️  MySQL auto-setup skipped (MongoDB is primary for employee portal)');
+      console.log(`   MySQL server: ${connectionConfig.host}:${connectionConfig.port} (optional)`);
+    } else {
+      console.log('ℹ️  MySQL auto-setup skipped:', error.message);
+    }
     return false;
   }
 }
