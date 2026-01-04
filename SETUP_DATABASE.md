@@ -81,7 +81,7 @@ npm run dev
 
 Expected output:
 ```
-🚀 Server running on http://localhost:5000
+🚀 Server running on http://localhost:5008
 ✅ Database connected successfully
    Host: 192.168.50.29
    User: apiuser

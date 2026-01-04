@@ -17,6 +17,7 @@ const formatQueryForExport = (query) => {
     'Company Name': query.companyName || '',
     'Location': query.location || '',
     'Customer Query': query.customerQuery,
+    'How did you hear about us?': query.howDidYouHearAboutUs || '',
     'Agent Remark': query.agentRemark || '',
     'Query Received Date': query.queryReceivedDate ? new Date(query.queryReceivedDate).toLocaleDateString() : '',
     'Agent Calling Date': query.agentCallingDate ? new Date(query.agentCallingDate).toLocaleDateString() : '',
@@ -26,7 +27,7 @@ const formatQueryForExport = (query) => {
   };
 };
 
-// @route   GET /api/query-tracker/reports/:type
+// @route   GET /api/reports/:type
 // @desc    Get report data
 // @access  Private
 router.get('/:type', auth, async (req, res) => {
@@ -38,7 +39,7 @@ router.get('/:type', auth, async (req, res) => {
     switch (type) {
       case 'all':
         // Admin sees all, users see only their queries
-        if (req.user.role !== 'admin' && req.user.role !== 'superadmin') {
+        if (req.user.role !== 'admin') {
           query.$or = [
             { createdBy: req.user._id },
             { assignedTo: req.user._id }
@@ -50,7 +51,7 @@ router.get('/:type', auth, async (req, res) => {
         break;
       case 'open':
         query.status = 'Open';
-        if (req.user.role !== 'admin' && req.user.role !== 'superadmin') {
+        if (req.user.role !== 'admin') {
           query.$or = [
             { createdBy: req.user._id },
             { assignedTo: req.user._id }
@@ -59,7 +60,7 @@ router.get('/:type', auth, async (req, res) => {
         break;
       case 'closed':
         query.status = 'Closed';
-        if (req.user.role !== 'admin' && req.user.role !== 'superadmin') {
+        if (req.user.role !== 'admin') {
           query.$or = [
             { createdBy: req.user._id },
             { assignedTo: req.user._id }
@@ -68,7 +69,7 @@ router.get('/:type', auth, async (req, res) => {
         break;
       case 'in-progress':
         query.status = 'In-Progress';
-        if (req.user.role !== 'admin' && req.user.role !== 'superadmin') {
+        if (req.user.role !== 'admin') {
           query.$or = [
             { createdBy: req.user._id },
             { assignedTo: req.user._id }
@@ -93,7 +94,7 @@ router.get('/:type', auth, async (req, res) => {
   }
 });
 
-// @route   GET /api/query-tracker/reports/:type/excel
+// @route   GET /api/reports/:type/excel
 // @desc    Download report as Excel
 // @access  Private
 router.get('/:type/excel', auth, async (req, res) => {
@@ -103,7 +104,7 @@ router.get('/:type/excel', auth, async (req, res) => {
 
     switch (type) {
       case 'all':
-        if (req.user.role !== 'admin' && req.user.role !== 'superadmin') {
+        if (req.user.role !== 'admin') {
           query.$or = [{ createdBy: req.user._id }, { assignedTo: req.user._id }];
         }
         break;
@@ -112,19 +113,19 @@ router.get('/:type/excel', auth, async (req, res) => {
         break;
       case 'open':
         query.status = 'Open';
-        if (req.user.role !== 'admin' && req.user.role !== 'superadmin') {
+        if (req.user.role !== 'admin') {
           query.$or = [{ createdBy: req.user._id }, { assignedTo: req.user._id }];
         }
         break;
       case 'closed':
         query.status = 'Closed';
-        if (req.user.role !== 'admin' && req.user.role !== 'superadmin') {
+        if (req.user.role !== 'admin') {
           query.$or = [{ createdBy: req.user._id }, { assignedTo: req.user._id }];
         }
         break;
       case 'in-progress':
         query.status = 'In-Progress';
-        if (req.user.role !== 'admin' && req.user.role !== 'superadmin') {
+        if (req.user.role !== 'admin') {
           query.$or = [{ createdBy: req.user._id }, { assignedTo: req.user._id }];
         }
         break;
@@ -154,7 +155,7 @@ router.get('/:type/excel', auth, async (req, res) => {
   }
 });
 
-// @route   GET /api/query-tracker/reports/:type/pdf
+// @route   GET /api/reports/:type/pdf
 // @desc    Download report as PDF
 // @access  Private
 router.get('/:type/pdf', auth, async (req, res) => {
@@ -164,7 +165,7 @@ router.get('/:type/pdf', auth, async (req, res) => {
 
     switch (type) {
       case 'all':
-        if (req.user.role !== 'admin' && req.user.role !== 'superadmin') {
+        if (req.user.role !== 'admin') {
           query.$or = [{ createdBy: req.user._id }, { assignedTo: req.user._id }];
         }
         break;
@@ -173,19 +174,19 @@ router.get('/:type/pdf', auth, async (req, res) => {
         break;
       case 'open':
         query.status = 'Open';
-        if (req.user.role !== 'admin' && req.user.role !== 'superadmin') {
+        if (req.user.role !== 'admin') {
           query.$or = [{ createdBy: req.user._id }, { assignedTo: req.user._id }];
         }
         break;
       case 'closed':
         query.status = 'Closed';
-        if (req.user.role !== 'admin' && req.user.role !== 'superadmin') {
+        if (req.user.role !== 'admin') {
           query.$or = [{ createdBy: req.user._id }, { assignedTo: req.user._id }];
         }
         break;
       case 'in-progress':
         query.status = 'In-Progress';
-        if (req.user.role !== 'admin' && req.user.role !== 'superadmin') {
+        if (req.user.role !== 'admin') {
           query.$or = [{ createdBy: req.user._id }, { assignedTo: req.user._id }];
         }
         break;
@@ -216,6 +217,7 @@ router.get('/:type/pdf', auth, async (req, res) => {
       doc.text(`Company: ${query.companyName || 'N/A'}`);
       doc.text(`Location: ${query.location || 'N/A'}`);
       doc.text(`Query: ${query.customerQuery}`);
+      doc.text(`How did you hear about us?: ${query.howDidYouHearAboutUs || 'N/A'}`);
       doc.text(`Status: ${query.status}`);
       doc.text(`Received Date: ${query.queryReceivedDate ? new Date(query.queryReceivedDate).toLocaleDateString() : 'N/A'}`);
       doc.moveDown();
@@ -228,7 +230,7 @@ router.get('/:type/pdf', auth, async (req, res) => {
   }
 });
 
-// @route   GET /api/query-tracker/reports/:type/csv
+// @route   GET /api/reports/:type/csv
 // @desc    Download report as CSV
 // @access  Private
 router.get('/:type/csv', auth, async (req, res) => {
@@ -238,7 +240,7 @@ router.get('/:type/csv', auth, async (req, res) => {
 
     switch (type) {
       case 'all':
-        if (req.user.role !== 'admin' && req.user.role !== 'superadmin') {
+        if (req.user.role !== 'admin') {
           query.$or = [{ createdBy: req.user._id }, { assignedTo: req.user._id }];
         }
         break;
@@ -247,19 +249,19 @@ router.get('/:type/csv', auth, async (req, res) => {
         break;
       case 'open':
         query.status = 'Open';
-        if (req.user.role !== 'admin' && req.user.role !== 'superadmin') {
+        if (req.user.role !== 'admin') {
           query.$or = [{ createdBy: req.user._id }, { assignedTo: req.user._id }];
         }
         break;
       case 'closed':
         query.status = 'Closed';
-        if (req.user.role !== 'admin' && req.user.role !== 'superadmin') {
+        if (req.user.role !== 'admin') {
           query.$or = [{ createdBy: req.user._id }, { assignedTo: req.user._id }];
         }
         break;
       case 'in-progress':
         query.status = 'In-Progress';
-        if (req.user.role !== 'admin' && req.user.role !== 'superadmin') {
+        if (req.user.role !== 'admin') {
           query.$or = [{ createdBy: req.user._id }, { assignedTo: req.user._id }];
         }
         break;

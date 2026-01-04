@@ -1,117 +1,212 @@
 const jwt = require('jsonwebtoken');
-const { ObjectId } = require('mongodb');
+const mongoose = require('mongoose');
 const User = require('../models/User');
 const { connectMongo, getUsersCollection, LOGIN_DB_NAME } = require('../../config/mongo');
 
+// Ensure Query Tracker database is connected
+const QUERY_TRACKER_DB_NAME = process.env.QUERY_TRACKER_DB_NAME || 'query_tracker';
+const QUERY_TRACKER_MONGO_URI = process.env.MONGO_URI || 'mongodb://localhost:27017/';
+
+async function ensureQueryTrackerConnection() {
+  try {
+    // Check if already connected to Query Tracker database
+    if (mongoose.connection.readyState === 1 && mongoose.connection.db.databaseName === QUERY_TRACKER_DB_NAME) {
+      return;
+    }
+    
+    // Connect to Query Tracker database if not connected
+    if (mongoose.connection.readyState === 0) {
+      await mongoose.connect(`${QUERY_TRACKER_MONGO_URI}${QUERY_TRACKER_DB_NAME}`, {
+        useNewUrlParser: true,
+        useUnifiedTopology: true
+      });
+      console.log('[Query Tracker Auth] Connected to Query Tracker database');
+    } else if (mongoose.connection.db.databaseName !== QUERY_TRACKER_DB_NAME) {
+      // Switch to Query Tracker database
+      mongoose.connection.useDb(QUERY_TRACKER_DB_NAME);
+      console.log('[Query Tracker Auth] Switched to Query Tracker database');
+    }
+  } catch (error) {
+    console.error('[Query Tracker Auth] Error connecting to Query Tracker database:', error);
+    throw error;
+  }
+}
+
 const auth = async (req, res, next) => {
   try {
-    const token = req.header('Authorization')?.replace('Bearer ', '');
+    // Ensure Query Tracker database connection
+    await ensureQueryTrackerConnection();
+    
+    const authHeader = req.header('Authorization');
+    const token = authHeader?.replace('Bearer ', '');
+    
+    console.log('[Query Tracker Auth] Request received:', {
+      hasAuthHeader: !!authHeader,
+      hasToken: !!token,
+      path: req.path,
+      method: req.method
+    });
     
     if (!token) {
+      console.log('[Query Tracker Auth] No token provided');
       return res.status(401).json({ message: 'No token, authorization denied' });
     }
 
-    // Verify JWT token
-    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'your-secret-key-change-in-production');
+    // Use the same JWT_SECRET as main auth, with same fallback
+    const jwtSecret = process.env.JWT_SECRET || 'your-secret-key-change-in-production';
     
-    // First, try to find user in main app's database (ecosoul_project_tracker)
+    let decoded;
     try {
-      await connectMongo(LOGIN_DB_NAME);
-      const usersCol = getUsersCollection();
-      const mainAppUser = await usersCol.findOne({ _id: new ObjectId(decoded.userId) });
-      
-      if (mainAppUser && mainAppUser.isActive !== false) {
-        // Convert ObjectId to string for consistency
-        const userId = mainAppUser._id?.toString() || mainAppUser._id;
-        
-        // Ensure _id is a proper ObjectId for Mongoose
-        let mongooseId;
-        try {
-          if (mainAppUser._id instanceof ObjectId) {
-            mongooseId = mainAppUser._id;
-          } else if (typeof mainAppUser._id === 'string') {
-            mongooseId = new ObjectId(mainAppUser._id);
-          } else {
-            mongooseId = mainAppUser._id;
-          }
-        } catch (e) {
-          mongooseId = mainAppUser._id;
-        }
-        
-        // User found in main app - map to Query Tracker format
-        // Create a Mongoose-compatible user object
-        req.user = {
-          _id: mongooseId, // Keep as ObjectId for Mongoose queries
-          id: userId,
-          name: mainAppUser.name,
-          email: mainAppUser.email,
-          role: mainAppUser.role || 'user',
-          isActive: mainAppUser.isActive !== false,
-          // Store original user data for reference
-          _mainAppUser: mainAppUser
-        };
-        
-        // Optionally sync user to Query Tracker database for consistency
-        try {
-          const queryTrackerUser = await User.findOne({ email: mainAppUser.email });
-          if (!queryTrackerUser) {
-            // Create user in Query Tracker database if doesn't exist
-            await User.create({
-              name: mainAppUser.name,
-              email: mainAppUser.email,
-              role: mainAppUser.role || 'user',
-              isActive: mainAppUser.isActive !== false,
-              password: 'synced-from-main-app' // Placeholder, won't be used for auth
-            });
-          } else {
-            // Update existing user
-            queryTrackerUser.name = mainAppUser.name;
-            queryTrackerUser.role = mainAppUser.role || 'user';
-            queryTrackerUser.isActive = mainAppUser.isActive !== false;
-            await queryTrackerUser.save();
-          }
-        } catch (syncError) {
-          // Log but don't fail - user can still access
-          console.warn('Failed to sync user to Query Tracker DB:', syncError.message);
-        }
-        
-        return next();
-      }
-    } catch (mainAppError) {
-      // If main app lookup fails, fall back to Query Tracker's own User model
-      console.warn('Main app user lookup failed, trying Query Tracker DB:', mainAppError.message);
+      decoded = jwt.verify(token, jwtSecret);
+    } catch (jwtError) {
+      console.error('[Query Tracker Auth] JWT verification failed:', {
+        error: jwtError.message,
+        name: jwtError.name,
+        jwtSecretSet: !!process.env.JWT_SECRET
+      });
+      return res.status(401).json({ 
+        message: 'Token is not valid', 
+        error: process.env.NODE_ENV === 'development' ? jwtError.message : 'Invalid token'
+      });
     }
-
-    // Fallback: Check Query Tracker's own User model (for backward compatibility)
-    const queryTrackerUser = await User.findById(decoded.userId).select('-password');
     
-    if (!queryTrackerUser || !queryTrackerUser.isActive) {
-      return res.status(401).json({ message: 'User not found or inactive' });
+    console.log('[Query Tracker Auth] Token decoded:', { 
+      hasEmail: !!decoded.email, 
+      hasUserId: !!decoded.userId,
+      email: decoded.email,
+      role: decoded.role 
+    });
+    
+    let user = null;
+    
+    // Priority 1: If token has email, use that to find/create user (main auth uses email)
+    if (decoded.email) {
+      // First try to find user in Query Tracker database by email
+      try {
+        user = await User.findOne({ email: decoded.email }).select('-password');
+        if (user) {
+          console.log('[Query Tracker Auth] User found in Query Tracker:', user.email);
+        }
+      } catch (dbError) {
+        console.error('[Query Tracker Auth] Error finding user in Query Tracker:', dbError);
+      }
+      
+      // If not found in Query Tracker, try to get from main auth database
+      if (!user) {
+        try {
+          await connectMongo(LOGIN_DB_NAME);
+          const usersCol = await getUsersCollection();
+          const mainUser = await usersCol.findOne({ email: decoded.email });
+          
+          if (mainUser) {
+            // Check if user exists in Query Tracker, if not create one
+            let queryTrackerUser = await User.findOne({ email: decoded.email });
+            
+            if (!queryTrackerUser) {
+              // Create new user - password will be hashed by pre-save hook
+              queryTrackerUser = new User({
+                name: mainUser.name || decoded.email,
+                email: decoded.email,
+                password: 'temp-password-' + Date.now(), // Will be hashed by pre-save hook
+                role: mainUser.role === 'admin' ? 'admin' : 'user',
+                isActive: true
+              });
+              await queryTrackerUser.save();
+            } else {
+              // Update existing user
+              queryTrackerUser.name = mainUser.name || queryTrackerUser.name;
+              queryTrackerUser.role = mainUser.role === 'admin' ? 'admin' : 'user';
+              queryTrackerUser.isActive = true;
+              await queryTrackerUser.save();
+            }
+            
+            user = await User.findById(queryTrackerUser._id).select('-password');
+          }
+        } catch (error) {
+          console.error('Error syncing user from main auth:', error);
+        }
+      }
+      
+      // If still no user, create a basic user from token data
+      if (!user) {
+        try {
+          let queryTrackerUser = await User.findOne({ email: decoded.email });
+          
+          if (!queryTrackerUser) {
+            console.log('[Query Tracker Auth] Creating new user from token:', decoded.email);
+            queryTrackerUser = new User({
+              name: decoded.email.split('@')[0] || 'User',
+              email: decoded.email,
+              password: 'temp-password-' + Date.now(), // Will be hashed by pre-save hook
+              role: decoded.role === 'admin' ? 'admin' : 'user',
+              isActive: true
+            });
+            await queryTrackerUser.save();
+            console.log('[Query Tracker Auth] User created successfully:', queryTrackerUser._id);
+          }
+          
+          user = await User.findById(queryTrackerUser._id).select('-password');
+          if (user) {
+            console.log('[Query Tracker Auth] User found after creation:', user.email);
+          }
+        } catch (error) {
+          console.error('[Query Tracker Auth] Error creating user from token:', error);
+          console.error('Error details:', {
+            message: error.message,
+            stack: error.stack,
+            email: decoded.email
+          });
+        }
+      }
+    } 
+    // Priority 2: If token has userId (for Query Tracker native tokens), try to find by MongoDB ObjectId
+    else if (decoded.userId) {
+      try {
+        // Check if userId is a valid MongoDB ObjectId
+        const { ObjectId } = require('mongoose').Types;
+        if (ObjectId.isValid(decoded.userId)) {
+          user = await User.findById(decoded.userId).select('-password');
+        }
+      } catch (error) {
+        console.error('Error finding user by userId:', error);
+      }
+    }
+    
+    if (!user) {
+      console.log('[Query Tracker Auth] User not found after all attempts:', { 
+        email: decoded.email,
+        hasEmail: !!decoded.email,
+        hasUserId: !!decoded.userId
+      });
+      return res.status(401).json({ message: 'User not found. Please contact administrator.' });
+    }
+    
+    if (!user.isActive) {
+      console.log('[Query Tracker Auth] User is inactive:', { 
+        email: user.email,
+        isActive: user.isActive
+      });
+      return res.status(401).json({ message: 'User account is inactive' });
     }
 
-    req.user = queryTrackerUser;
+    console.log('[Query Tracker Auth] Authentication successful:', { 
+      userId: user._id, 
+      email: user.email, 
+      role: user.role 
+    });
+    req.user = user;
     next();
   } catch (error) {
     console.error('Auth middleware error:', error);
-    res.status(401).json({ message: 'Token is not valid' });
+    // Don't expose internal error details in production
+    const errorMessage = process.env.NODE_ENV === 'development' ? error.message : 'Token is not valid';
+    res.status(401).json({ message: 'Token is not valid', error: errorMessage });
   }
 };
 
 const adminAuth = (req, res, next) => {
-  // Allow both 'admin' and 'superadmin' roles
-  if (!req.user) {
-    return res.status(401).json({ message: 'User not authenticated' });
-  }
-  
-  const userRole = req.user.role;
-  if (userRole !== 'admin' && userRole !== 'superadmin') {
-    if (process.env.NODE_ENV === 'development') {
-      console.log('AdminAuth failed - User role:', userRole, 'User:', req.user.email);
-    }
-    return res.status(403).json({ 
-      message: 'Access denied. Admin only.',
-      userRole: userRole // Include in dev mode for debugging
-    });
+  if (req.user.role !== 'admin') {
+    return res.status(403).json({ message: 'Access denied. Admin only.' });
   }
   next();
 };

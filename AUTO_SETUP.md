@@ -25,7 +25,7 @@ You'll see:
 🔧 Auto-setting up database...
 ✅ Database "worklytics_hrms" ready
 ✅ Users table ready
-🚀 Server running on http://localhost:5000
+🚀 Server running on http://localhost:5008
 ✅ Database connected successfully
 ```
 

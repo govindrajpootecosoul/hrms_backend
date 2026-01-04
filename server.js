@@ -16,7 +16,7 @@ const queryTrackerRoutes = require('./query-tracker-portal/routes');
 // const autoSetupDatabase = require('./utils/autoSetup');
 
 const app = express();
-const PORT = process.env.PORT || 5000;
+const PORT = process.env.PORT || 5008;
 
 // Middleware
 // CORS configuration - allow all origins for development
@@ -97,12 +97,33 @@ async function startServer() {
     console.log('   Server will start, but MongoDB features may not work until connection is established');
   }
   
+  // Connect to Query Tracker database
+  try {
+    const mongoose = require('mongoose');
+    const QUERY_TRACKER_DB_NAME = process.env.QUERY_TRACKER_DB_NAME || 'query_tracker';
+    const QUERY_TRACKER_MONGO_URI = process.env.MONGO_URI || 'mongodb://localhost:27017/';
+    
+    if (mongoose.connection.readyState === 0) {
+      await mongoose.connect(`${QUERY_TRACKER_MONGO_URI}${QUERY_TRACKER_DB_NAME}`, {
+        useNewUrlParser: true,
+        useUnifiedTopology: true
+      });
+      console.log(`✅ Query Tracker database connected: ${QUERY_TRACKER_DB_NAME}`);
+    } else {
+      console.log(`✅ Query Tracker database already connected`);
+    }
+  } catch (err) {
+    console.error('⚠️  Query Tracker database connection warning:', err.message);
+    console.log('   Query Tracker features may not work until connection is established');
+  }
+  
   // Start server
   app.listen(PORT, () => {
     console.log(`🚀 Server running on http://localhost:${PORT}`);
     console.log(`📝 Using MongoDB for employee portal and authentication`);
     console.log(`   Login DB: ecosoul_project_tracker`);
     console.log(`   Employee Portal DB: Employee`);
+    console.log(`   Query Tracker DB: query_tracker`);
   });
 }
 

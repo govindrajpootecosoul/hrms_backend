@@ -4,7 +4,7 @@ const { connectMongo, getDb } = require('../../config/mongo');
 
 // Helper: ensure a single doc exists per employeeId/type
 async function getOrCreateDoc(collectionName, filter, defaultDoc) {
-  const db = getDb();
+  const db = await getDb();
   const col = db.collection(collectionName);
   let doc = await col.findOne(filter);
   if (!doc) {
@@ -216,7 +216,7 @@ router.post('/checkin', async (req, res) => {
 
     console.log(`[checkin] Employee ${employeeId} attempting to check in`);
 
-    const db = getDb();
+    const db = await getDb();
     const col = db.collection('employee_checkins');
     const today = new Date().toISOString().split('T')[0];
     
@@ -277,7 +277,7 @@ router.post('/checkout', async (req, res) => {
 
     console.log(`[checkout] Employee ${employeeId} attempting to check out`);
 
-    const db = getDb();
+    const db = await getDb();
     const col = db.collection('employee_checkins');
     const today = new Date().toISOString().split('T')[0];
     
@@ -341,7 +341,7 @@ router.get('/checkin/status', async (req, res) => {
       return res.status(400).json({ success: false, error: 'Employee ID is required' });
     }
 
-    const db = getDb();
+    const db = await getDb();
     const col = db.collection('employee_checkins');
     const today = new Date().toISOString().split('T')[0];
     
@@ -405,7 +405,7 @@ router.get('/checkin/history', async (req, res) => {
       return res.status(400).json({ success: false, error: 'Employee ID is required' });
     }
 
-    const db = getDb();
+    const db = await getDb();
     const col = db.collection('employee_checkins');
     
     const history = await col

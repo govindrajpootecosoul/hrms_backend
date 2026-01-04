@@ -44,7 +44,7 @@ DB_USER=root
 DB_PASSWORD=Thrive@2910
 DB_NAME=worklytics_hrms
 JWT_SECRET=your-secret-key-change-in-production
-PORT=5000
+PORT=5008
 ```
 
 ## Solution 3: Check MySQL Configuration

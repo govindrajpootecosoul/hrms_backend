@@ -1,28 +1,134 @@
 const { MongoClient } = require('mongodb');
 
-const MONGO_URI = process.env.MONGO_URI || 'mongodb://localhost:27017/';
-const LOGIN_DB_NAME = process.env.MONGO_LOGIN_DB_NAME || 'ecosoul_project_tracker';
-const EMPLOYEE_DB_NAME = process.env.MONGO_DB_NAME || 'Employee';
+// MongoDB connection URI - supports both dev and production
+// If MONGO_URI is set, use it. Otherwise, use non-authenticated connection
+// (Authentication can be enabled later via environment variable)
+const MONGO_URI = process.env.MONGO_URI || (
+  process.env.NODE_ENV === 'production'
+    ? 'mongodb://localhost:27017/'  // Use localhost connection
+    : 'mongodb://localhost:27017/'
+);
+
+const LOGIN_DB_NAME = process.env.MONGO_LOGIN_DB_NAME || (
+  process.env.NODE_ENV === 'production' ? 'ecosoul_project_tracker' : 'ecosoul_project_tracker'
+);
+const EMPLOYEE_DB_NAME = process.env.MONGO_DB_NAME || (
+  process.env.NODE_ENV === 'production' ? 'hrms_prod' : 'Employee'
+);
 const USERS_COLLECTION = process.env.MONGO_USERS_COLLECTION || 'users';
 
 let client;
 let loginDb;
 let employeeDb;
+let isConnecting = false;
 
-async function connectMongo(dbName = null) {
-  if (!client) {
+// Check if client is connected and topology is open
+function isClientConnected() {
+  return client && client.topology && client.topology.isConnected();
+}
+
+// Reconnect if connection is closed
+async function ensureConnection() {
+  if (!client || !isClientConnected()) {
+    if (isConnecting) {
+      // Wait for ongoing connection attempt
+      let attempts = 0;
+      while (isConnecting && attempts < 50) {
+        await new Promise(resolve => setTimeout(resolve, 100));
+        attempts++;
+      }
+      if (isClientConnected()) return;
+    }
+    
+    isConnecting = true;
     try {
-      client = new MongoClient(MONGO_URI, {
-        maxPoolSize: 10,
-        connectTimeoutMS: 10000,
-      });
-      await client.connect();
-      console.log(`✅ [mongo] Connected to MongoDB at ${MONGO_URI}`);
+      // Close existing client if it exists
+      if (client) {
+        try {
+          await client.close();
+        } catch (err) {
+          // Ignore close errors
+        }
+      }
+      
+      // Reset database references
+      loginDb = null;
+      employeeDb = null;
+      
+      // Create new connection with smart authentication handling
+      let connectionUri = MONGO_URI;
+      
+      // Check if URI contains credentials but we should try without first
+      // If MONGO_URI env var is explicitly set, use it as-is
+      // Otherwise, use non-auth connection
+      const hasExplicitUri = process.env.MONGO_URI;
+      const hasCredentials = connectionUri.includes('@') && connectionUri.includes(':');
+      
+      // If credentials are in URI but not explicitly set via env, try without auth first
+      if (hasCredentials && !hasExplicitUri) {
+        // Remove credentials from URI
+        connectionUri = connectionUri.replace(/mongodb:\/\/[^@]+@/, 'mongodb://');
+      }
+      
+      try {
+        client = new MongoClient(connectionUri, {
+          maxPoolSize: 10,
+          connectTimeoutMS: 15008,
+          serverSelectionTimeoutMS: 15008,
+          socketTimeoutMS: 45008,
+          heartbeatFrequencyMS: 10000,
+          retryWrites: true,
+          retryReads: true,
+        });
+        
+        await client.connect();
+        const authStatus = hasCredentials && hasExplicitUri ? ' (with authentication)' : ' (without authentication)';
+        console.log(`✅ [mongo] Connected to MongoDB${authStatus}`);
+      } catch (connectError) {
+        // If connection fails and we have credentials in original URI, try with credentials
+        if (hasCredentials && !hasExplicitUri && connectError.message && !connectError.message.includes('Authentication')) {
+          console.warn(`⚠️  [mongo] Connection failed, trying with authentication...`);
+          
+          if (client) {
+            try {
+              await client.close();
+            } catch (e) {}
+          }
+          
+          // Try with original URI that has credentials
+          const authUri = MONGO_URI;
+          try {
+            client = new MongoClient(authUri, {
+              maxPoolSize: 10,
+              connectTimeoutMS: 10000,
+              serverSelectionTimeoutMS: 10000,
+              socketTimeoutMS: 45008,
+              heartbeatFrequencyMS: 10000,
+            });
+            
+            await client.connect();
+            console.log(`✅ [mongo] Connected to MongoDB (with authentication)`);
+          } catch (authError) {
+            console.error(`❌ [mongo] Connection failed: ${authError.message}`);
+            throw authError;
+          }
+        } else {
+          console.error(`❌ [mongo] Connection failed: ${connectError.message}`);
+          throw connectError;
+        }
+      }
     } catch (err) {
-      console.error(`❌ [mongo] Connection failed: ${err.message}`);
+      console.error(`❌ [mongo] Reconnection failed: ${err.message}`);
       throw err;
+    } finally {
+      isConnecting = false;
     }
   }
+}
+
+async function connectMongo(dbName = null) {
+  // Ensure connection is active
+  await ensureConnection();
 
   const targetDb = dbName || EMPLOYEE_DB_NAME;
   
@@ -41,25 +147,28 @@ async function connectMongo(dbName = null) {
   }
 }
 
-function getDb(dbName = null) {
+async function getDb(dbName = null) {
+  // Ensure connection before getting database
+  await ensureConnection();
+  
   const targetDb = dbName || EMPLOYEE_DB_NAME;
   
   if (targetDb === LOGIN_DB_NAME) {
     if (!loginDb) {
-      throw new Error('Login MongoDB not connected yet. Call connectMongo("ecosoul_project_tracker") first.');
+      loginDb = client.db(LOGIN_DB_NAME);
     }
     return loginDb;
   } else {
     if (!employeeDb) {
-      throw new Error('Employee MongoDB not connected yet. Call connectMongo() first.');
+      employeeDb = client.db(EMPLOYEE_DB_NAME);
     }
     return employeeDb;
   }
 }
 
-function getUsersCollection() {
+async function getUsersCollection() {
   // For login, always use ecosoul_project_tracker database
-  const db = getDb(LOGIN_DB_NAME);
+  const db = await getDb(LOGIN_DB_NAME);
   return db.collection(USERS_COLLECTION);
 }
 

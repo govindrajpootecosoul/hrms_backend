@@ -52,14 +52,18 @@ const querySchema = new mongoose.Schema({
   },
   assignedTo: {
     type: mongoose.Schema.Types.ObjectId,
-    ref: 'QueryTrackerUser'
+    ref: 'User'
   },
   createdBy: {
     type: mongoose.Schema.Types.ObjectId,
-    ref: 'QueryTrackerUser',
+    ref: 'User',
     required: true
   },
   queryType: {
+    type: String,
+    trim: true
+  },
+  howDidYouHearAboutUs: {
     type: String,
     trim: true
   }

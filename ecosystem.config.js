@@ -1,0 +1,46 @@
+const path = require('path');
+
+module.exports = {
+  apps: [
+    {
+      name: 'HRMS-backend',
+      script: './server.js',
+      cwd: path.resolve(__dirname),
+      instances: 'max',
+      exec_mode: 'cluster',
+      env_production: {
+        NODE_ENV: 'production',
+        PORT: 5008
+      },
+      error_file: './logs/err.log',
+      out_file: './logs/out.log',
+      log_file: './logs/combined.log',
+      time: true,
+      merge_logs: true,
+      autorestart: true,
+      watch: false,
+      max_memory_restart: '1G',
+      node_args: '--max-old-space-size=1024'
+    },
+    {
+      name: 'HRMS-frontend',
+      script: './start-server.js',
+      cwd: path.resolve(__dirname, '../worklytics_HRMS_frontend'),
+      instances: 1,
+      exec_mode: 'fork',
+      env_production: {
+        NODE_ENV: 'production',
+        PORT: 4000
+      },
+      error_file: './logs/frontend-err.log',
+      out_file: './logs/frontend-out.log',
+      log_file: './logs/frontend-combined.log',
+      time: true,
+      merge_logs: true,
+      autorestart: true,
+      watch: false,
+      max_memory_restart: '1G'
+    }
+  ]
+};
+

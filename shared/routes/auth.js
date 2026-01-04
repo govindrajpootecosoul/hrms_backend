@@ -111,7 +111,7 @@ router.post('/login', async (req, res) => {
 
     // Connect to login database (ecosoul_project_tracker)
     await connectMongo(LOGIN_DB_NAME);
-    const usersCol = getUsersCollection();
+    const usersCol = await getUsersCollection();
     console.log(`[login] Querying users collection in database: ${LOGIN_DB_NAME}, email: ${email}`);
     const user = await usersCol.findOne({ email });
 
@@ -199,7 +199,7 @@ router.get('/verify', async (req, res) => {
 
     // Connect to login database (ecosoul_project_tracker)
     await connectMongo(LOGIN_DB_NAME);
-    const usersCol = getUsersCollection();
+    const usersCol = await getUsersCollection();
 
     const user = await usersCol.findOne({ _id: new ObjectId(decoded.userId) });
 

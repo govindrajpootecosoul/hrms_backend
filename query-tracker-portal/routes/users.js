@@ -5,7 +5,7 @@ const { auth, adminAuth } = require('../middleware/auth');
 
 const router = express.Router();
 
-// @route   GET /api/query-tracker/users
+// @route   GET /api/users
 // @desc    Get all users (Admin only)
 // @access  Private/Admin
 router.get('/', auth, adminAuth, async (req, res) => {
@@ -18,7 +18,7 @@ router.get('/', auth, adminAuth, async (req, res) => {
   }
 });
 
-// @route   GET /api/query-tracker/users/:id
+// @route   GET /api/users/:id
 // @desc    Get single user
 // @access  Private/Admin
 router.get('/:id', auth, adminAuth, async (req, res) => {
@@ -34,7 +34,7 @@ router.get('/:id', auth, adminAuth, async (req, res) => {
   }
 });
 
-// @route   PUT /api/query-tracker/users/:id
+// @route   PUT /api/users/:id
 // @desc    Update user
 // @access  Private/Admin
 router.put('/:id', [
@@ -81,7 +81,7 @@ router.put('/:id', [
   }
 });
 
-// @route   DELETE /api/query-tracker/users/:id
+// @route   DELETE /api/users/:id
 // @desc    Delete user (soft delete by setting isActive to false)
 // @access  Private/Admin
 router.delete('/:id', auth, adminAuth, async (req, res) => {

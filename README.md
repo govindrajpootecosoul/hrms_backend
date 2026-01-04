@@ -13,7 +13,7 @@ npm run dev
 That's it! The server will:
 - ✅ Auto-create `worklytics_hrms` database
 - ✅ Auto-create `users` table
-- ✅ Start on http://localhost:5000
+- ✅ Start on http://localhost:5008
 
 ## 📋 Database Configuration
 
@@ -81,7 +81,7 @@ DB_PASSWORD=Thrive@2910
 DB_NAME=worklytics_hrms
 DB_POOL_SIZE=12
 JWT_SECRET=your-secret-key-change-in-production
-PORT=5000
+PORT=5008
 ```
 
 ## 📚 Documentation

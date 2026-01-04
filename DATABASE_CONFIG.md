@@ -64,6 +64,6 @@ DB_PASSWORD=Thrive@2910
 DB_NAME=worklytics_hrms
 DB_POOL_SIZE=12
 JWT_SECRET=your-secret-key-change-in-production
-PORT=5000
+PORT=5008
 ```
 
