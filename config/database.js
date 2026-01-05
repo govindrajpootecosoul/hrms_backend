@@ -1,14 +1,15 @@
 const mysql = require('mysql2/promise');
 require('dotenv').config();
+const { config } = require('./app.config');
 
 const DB_CONFIG = {
-  host: process.env.DB_HOST || '192.168.50.29',
-  port: process.env.DB_PORT || 3306,
-  user: process.env.DB_USER || 'apiuser',
-  password: process.env.DB_PASSWORD || 'Thrive@2910',
-  database: process.env.DB_NAME || 'worklytics_hrms',
+  host: config.mysql.host,
+  port: config.mysql.port,
+  user: config.mysql.user,
+  password: config.mysql.password,
+  database: config.mysql.database,
   waitForConnections: true,
-  connectionLimit: process.env.DB_POOL_SIZE || 12,
+  connectionLimit: config.mysql.poolSize,
   queueLimit: 0,
   connectTimeout: 10000 // 10 seconds connection timeout
 };

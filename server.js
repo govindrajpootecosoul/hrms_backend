@@ -2,6 +2,9 @@ const express = require('express');
 const cors = require('cors');
 require('dotenv').config();
 
+// Import centralized config
+const { config, ports, getMongoUri, getBackendUrl } = require('./config/app.config');
+
 // Shared routes (used by all portals)
 const authRoutes = require('./shared/routes/auth');
 const adminUsersRoutes = require('./shared/routes/admin-users');
@@ -17,7 +20,7 @@ const queryTrackerRoutes = require('./query-tracker-portal/routes');
 // const autoSetupDatabase = require('./utils/autoSetup');
 
 const app = express();
-const PORT = process.env.PORT || 5008;
+const PORT = ports.backend;
 
 // Middleware
 // CORS configuration - allow all origins for development
@@ -70,7 +73,7 @@ app.get('/api/health', async (req, res) => {
       type: 'MongoDB',
       connected: mongoStatus,
       error: mongoError,
-      uri: process.env.MONGO_URI || 'mongodb://localhost:27017/'
+      uri: getMongoUri()
     }
   });
 });
@@ -102,15 +105,14 @@ async function startServer() {
   // Connect to Query Tracker database
   try {
     const mongoose = require('mongoose');
-    const QUERY_TRACKER_DB_NAME = process.env.QUERY_TRACKER_DB_NAME || 'query_tracker';
-    const QUERY_TRACKER_MONGO_URI = process.env.MONGO_URI || 'mongodb://localhost:27017/';
+    const queryTrackerUri = getMongoUri(config.mongodb.queryTrackerDbName);
     
     if (mongoose.connection.readyState === 0) {
-      await mongoose.connect(`${QUERY_TRACKER_MONGO_URI}${QUERY_TRACKER_DB_NAME}`, {
+      await mongoose.connect(queryTrackerUri, {
         useNewUrlParser: true,
         useUnifiedTopology: true
       });
-      console.log(`✅ Query Tracker database connected: ${QUERY_TRACKER_DB_NAME}`);
+      console.log(`✅ Query Tracker database connected: ${config.mongodb.queryTrackerDbName}`);
     } else {
       console.log(`✅ Query Tracker database already connected`);
     }
@@ -121,11 +123,11 @@ async function startServer() {
   
   // Start server
   app.listen(PORT, () => {
-    console.log(`🚀 Server running on http://localhost:${PORT}`);
+    console.log(`🚀 Server running on ${getBackendUrl()}`);
     console.log(`📝 Using MongoDB for employee portal and authentication`);
-    console.log(`   Login DB: ecosoul_project_tracker`);
-    console.log(`   Employee Portal DB: Employee`);
-    console.log(`   Query Tracker DB: query_tracker`);
+    console.log(`   Login DB: ${config.mongodb.loginDbName}`);
+    console.log(`   Employee Portal DB: ${config.mongodb.employeeDbName}`);
+    console.log(`   Query Tracker DB: ${config.mongodb.queryTrackerDbName}`);
   });
 }
 

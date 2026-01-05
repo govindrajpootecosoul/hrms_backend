@@ -2,6 +2,7 @@ const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
 const dotenv = require('dotenv');
+const { config, ports, getMongoUri, getBackendUrl } = require('../config/app.config');
 
 dotenv.config();
 
@@ -19,14 +20,15 @@ app.use('/api/users', require('./routes/users'));
 app.use('/api/reports', require('./routes/reports'));
 
 // MongoDB Connection
-mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/query_tracker', {
+const queryTrackerUri = getMongoUri(config.mongodb.queryTrackerDbName);
+mongoose.connect(queryTrackerUri, {
   useNewUrlParser: true,
   useUnifiedTopology: true,
 })
 .then(() => console.log('MongoDB Connected'))
 .catch(err => console.error('MongoDB connection error:', err));
 
-const PORT = process.env.PORT || 5009;
+const PORT = ports.queryTracker;
 
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);

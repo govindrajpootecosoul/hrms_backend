@@ -1,6 +1,7 @@
 const { MongoClient } = require('mongodb');
+const { getMongoUri } = require('./config/app.config');
 
-const MONGO_URI = process.env.MONGO_URI || 'mongodb://localhost:27017/';
+const MONGO_URI = getMongoUri();
 
 async function testConnection() {
   console.log('🔍 Testing MongoDB connection...');

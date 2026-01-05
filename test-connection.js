@@ -1,16 +1,17 @@
 const mysql = require('mysql2/promise');
 require('dotenv').config();
 const autoSetupDatabase = require('./utils/autoSetup');
+const { config } = require('./config/app.config');
 
 async function testConnection() {
-  const dbName = process.env.DB_NAME || 'worklytics_hrms';
+  const dbName = config.mysql.database;
   
   // First, try to setup database if it doesn't exist
   const connectionConfig = {
-    host: process.env.DB_HOST || '192.168.50.29',
-    port: process.env.DB_PORT || 3306,
-    user: process.env.DB_USER || 'apiuser',
-    password: process.env.DB_PASSWORD || 'Thrive@2910'
+    host: config.mysql.host,
+    port: config.mysql.port,
+    user: config.mysql.user,
+    password: config.mysql.password
   };
 
   console.log('🔌 Testing database connection...');

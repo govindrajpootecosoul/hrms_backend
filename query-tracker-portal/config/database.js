@@ -1,8 +1,9 @@
 const mongoose = require('mongoose');
+const { config, getMongoUri } = require('../../config/app.config');
 
 // Query Tracker database configuration
-const QUERY_TRACKER_DB_NAME = process.env.QUERY_TRACKER_DB_NAME || 'query_tracker';
-const QUERY_TRACKER_MONGO_URI = process.env.MONGO_URI || 'mongodb://localhost:27017/';
+const QUERY_TRACKER_DB_NAME = config.mongodb.queryTrackerDbName;
+const QUERY_TRACKER_MONGO_URI = getMongoUri();
 
 async function ensureQueryTrackerConnection() {
   try {

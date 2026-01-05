@@ -1,21 +1,14 @@
 const { MongoClient } = require('mongodb');
+const { config, getMongoUri } = require('./app.config');
 
 // MongoDB connection URI - supports both dev and production
 // If MONGO_URI is set, use it. Otherwise, use non-authenticated connection
 // (Authentication can be enabled later via environment variable)
-const MONGO_URI = process.env.MONGO_URI || (
-  process.env.NODE_ENV === 'production'
-    ? 'mongodb://localhost:27017/'  // Use localhost connection
-    : 'mongodb://localhost:27017/'
-);
+const MONGO_URI = getMongoUri();
 
-const LOGIN_DB_NAME = process.env.MONGO_LOGIN_DB_NAME || (
-  process.env.NODE_ENV === 'production' ? 'ecosoul_project_tracker' : 'ecosoul_project_tracker'
-);
-const EMPLOYEE_DB_NAME = process.env.MONGO_DB_NAME || (
-  process.env.NODE_ENV === 'production' ? 'hrms_prod' : 'Employee'
-);
-const USERS_COLLECTION = process.env.MONGO_USERS_COLLECTION || 'users';
+const LOGIN_DB_NAME = config.mongodb.loginDbName;
+const EMPLOYEE_DB_NAME = config.mongodb.employeeDbName;
+const USERS_COLLECTION = config.mongodb.usersCollection;
 
 let client;
 let loginDb;

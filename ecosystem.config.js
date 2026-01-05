@@ -1,4 +1,5 @@
 const path = require('path');
+const { ports } = require('./config/app.config');
 
 module.exports = {
   apps: [
@@ -10,7 +11,7 @@ module.exports = {
       exec_mode: 'cluster',
       env_production: {
         NODE_ENV: 'production',
-        PORT: 5008
+        PORT: ports.backend
       },
       error_file: './logs/err.log',
       out_file: './logs/out.log',
@@ -30,7 +31,7 @@ module.exports = {
       exec_mode: 'fork',
       env_production: {
         NODE_ENV: 'production',
-        PORT: 4000
+        PORT: ports.frontend
       },
       error_file: './logs/frontend-err.log',
       out_file: './logs/frontend-out.log',

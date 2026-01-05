@@ -1,12 +1,14 @@
 const mongoose = require('mongoose');
 const User = require('../models/User');
 const dotenv = require('dotenv');
+const { config, getMongoUri } = require('../../config/app.config');
 
 dotenv.config();
 
 const seedAdmin = async () => {
   try {
-    await mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/query_tracker', {
+    const queryTrackerUri = getMongoUri(config.mongodb.queryTrackerDbName);
+    await mongoose.connect(queryTrackerUri, {
       useNewUrlParser: true,
       useUnifiedTopology: true,
     });
