@@ -125,6 +125,15 @@ router.post('/login', async (req, res) => {
 
     console.log(`[login] User found: ${user.email}, employeeId: ${user.employeeId || 'N/A'}`);
 
+    // Check if user is active
+    if (user.isActive === false) {
+      console.log(`[login] User account is inactive for email: ${email}`);
+      return res.status(403).json({
+        success: false,
+        error: 'Your account has been deactivated. Please contact your administrator to reactivate your account.'
+      });
+    }
+
     // Verify password
     const isPasswordValid = await bcrypt.compare(password, user.password);
 
@@ -162,7 +171,8 @@ router.post('/login', async (req, res) => {
         department: user.department,
         company: user.company,
         isActive: user.isActive,
-        avatar: user.avatar
+        avatar: user.avatar,
+        portals: user.portals || [] // Include portals array
       }
     });
   } catch (error) {
@@ -210,6 +220,14 @@ router.get('/verify', async (req, res) => {
       });
     }
 
+    // Check if user is active
+    if (user.isActive === false) {
+      return res.status(403).json({
+        success: false,
+        error: 'Your account has been deactivated. Please contact your administrator to reactivate your account.'
+      });
+    }
+
     res.json({
       success: true,
       user: {
@@ -221,7 +239,8 @@ router.get('/verify', async (req, res) => {
         department: user.department,
         company: user.company,
         isActive: user.isActive,
-        avatar: user.avatar
+        avatar: user.avatar,
+        portals: user.portals || [] // Include portals array
       }
     });
   } catch (error) {

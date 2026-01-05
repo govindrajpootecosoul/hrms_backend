@@ -20,13 +20,14 @@ router.get('/', auth, async (req, res) => {
     } = req.query;
 
     const query = {};
+    const orConditions = [];
 
     // If user is not admin, only show their queries or assigned queries
     if (req.user.role !== 'admin') {
-      query.$or = [
+      orConditions.push(
         { createdBy: req.user._id },
         { assignedTo: req.user._id }
-      ];
+      );
     }
 
     if (status) query.status = status;
@@ -35,12 +36,20 @@ router.get('/', auth, async (req, res) => {
 
     // Global search filter
     if (search) {
-      query.$or = [
-        ...(query.$or || []),
+      orConditions.push(
         { customerName: { $regex: search, $options: 'i' } },
         { customerMobile: { $regex: search, $options: 'i' } },
         { queryType: { $regex: search, $options: 'i' } }
-      ];
+      );
+    }
+
+    // Combine all OR conditions
+    if (orConditions.length > 0) {
+      if (orConditions.length === 1) {
+        Object.assign(query, orConditions[0]);
+      } else {
+        query.$or = orConditions;
+      }
     }
 
     const skip = (parseInt(page) - 1) * parseInt(limit);
@@ -64,8 +73,11 @@ router.get('/', auth, async (req, res) => {
       }
     });
   } catch (error) {
-    console.error(error);
-    res.status(500).json({ message: 'Server error' });
+    console.error('[Queries Route Error]', error);
+    res.status(500).json({ 
+      message: 'Server error',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
   }
 });
 
@@ -91,8 +103,11 @@ router.get('/:id', auth, async (req, res) => {
 
     res.json(query);
   } catch (error) {
-    console.error(error);
-    res.status(500).json({ message: 'Server error' });
+    console.error('[Queries Route Error]', error);
+    res.status(500).json({ 
+      message: 'Server error',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
   }
 });
 
@@ -116,6 +131,14 @@ router.post('/', [
       createdBy: req.user._id
     };
 
+    // Handle empty assignedTo - only include if it's a valid non-empty value
+    if (req.body.assignedTo && req.body.assignedTo.trim() !== '') {
+      queryData.assignedTo = req.body.assignedTo;
+    } else {
+      // Remove assignedTo if it's empty to avoid ObjectId casting error
+      delete queryData.assignedTo;
+    }
+
     if (req.body.queryReceivedDate) {
       queryData.queryReceivedDate = new Date(req.body.queryReceivedDate);
     }
@@ -132,8 +155,11 @@ router.post('/', [
 
     res.status(201).json(populatedQuery);
   } catch (error) {
-    console.error(error);
-    res.status(500).json({ message: 'Server error' });
+    console.error('[Queries Route Error]', error);
+    res.status(500).json({ 
+      message: 'Server error',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
   }
 });
 
@@ -154,7 +180,18 @@ router.put('/:id', auth, async (req, res) => {
       return res.status(403).json({ message: 'Access denied' });
     }
 
-    Object.assign(query, req.body);
+    // Handle empty assignedTo - only include if it's a valid non-empty value
+    const updateData = { ...req.body };
+    if (req.body.assignedTo !== undefined) {
+      if (req.body.assignedTo && req.body.assignedTo.trim() !== '') {
+        updateData.assignedTo = req.body.assignedTo;
+      } else {
+        // Set to null if empty to clear the assignment
+        updateData.assignedTo = null;
+      }
+    }
+
+    Object.assign(query, updateData);
 
     if (req.body.queryReceivedDate) {
       query.queryReceivedDate = new Date(req.body.queryReceivedDate);
@@ -171,8 +208,11 @@ router.put('/:id', auth, async (req, res) => {
 
     res.json(populatedQuery);
   } catch (error) {
-    console.error(error);
-    res.status(500).json({ message: 'Server error' });
+    console.error('[Queries Route Error]', error);
+    res.status(500).json({ 
+      message: 'Server error',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
   }
 });
 
@@ -193,8 +233,11 @@ router.delete('/:id', auth, async (req, res) => {
 
     res.json({ message: 'Query deleted successfully' });
   } catch (error) {
-    console.error(error);
-    res.status(500).json({ message: 'Server error' });
+    console.error('[Queries Route Error]', error);
+    res.status(500).json({ 
+      message: 'Server error',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
   }
 });
 

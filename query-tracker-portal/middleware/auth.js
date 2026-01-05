@@ -2,49 +2,38 @@ const jwt = require('jsonwebtoken');
 const mongoose = require('mongoose');
 const User = require('../models/User');
 const { connectMongo, getUsersCollection, LOGIN_DB_NAME } = require('../../config/mongo');
+const { ensureQueryTrackerConnection } = require('../config/database');
 
-// Ensure Query Tracker database is connected
-const QUERY_TRACKER_DB_NAME = process.env.QUERY_TRACKER_DB_NAME || 'query_tracker';
-const QUERY_TRACKER_MONGO_URI = process.env.MONGO_URI || 'mongodb://localhost:27017/';
-
-async function ensureQueryTrackerConnection() {
-  try {
-    // Check if already connected to Query Tracker database
-    if (mongoose.connection.readyState === 1 && mongoose.connection.db.databaseName === QUERY_TRACKER_DB_NAME) {
-      return;
-    }
-    
-    // Connect to Query Tracker database if not connected
-    if (mongoose.connection.readyState === 0) {
-      await mongoose.connect(`${QUERY_TRACKER_MONGO_URI}${QUERY_TRACKER_DB_NAME}`, {
-        useNewUrlParser: true,
-        useUnifiedTopology: true
-      });
-      console.log('[Query Tracker Auth] Connected to Query Tracker database');
-    } else if (mongoose.connection.db.databaseName !== QUERY_TRACKER_DB_NAME) {
-      // Switch to Query Tracker database
-      mongoose.connection.useDb(QUERY_TRACKER_DB_NAME);
-      console.log('[Query Tracker Auth] Switched to Query Tracker database');
-    }
-  } catch (error) {
-    console.error('[Query Tracker Auth] Error connecting to Query Tracker database:', error);
-    throw error;
-  }
+// Ensure Query Tracker database is connected (using the helper)
+async function ensureQueryTrackerDB() {
+  await ensureQueryTrackerConnection();
 }
 
 const auth = async (req, res, next) => {
   try {
     // Ensure Query Tracker database connection
-    await ensureQueryTrackerConnection();
+    await ensureQueryTrackerDB();
     
-    const authHeader = req.header('Authorization');
-    const token = authHeader?.replace('Bearer ', '');
+    // Try multiple ways to get the Authorization header
+    const authHeader = req.header('Authorization') || req.headers.authorization || req.headers.Authorization;
+    let token = null;
+    
+    if (authHeader) {
+      // Handle both "Bearer token" and just "token" formats
+      if (authHeader.startsWith('Bearer ')) {
+        token = authHeader.replace('Bearer ', '').trim();
+      } else {
+        token = authHeader.trim();
+      }
+    }
     
     console.log('[Query Tracker Auth] Request received:', {
       hasAuthHeader: !!authHeader,
       hasToken: !!token,
+      tokenLength: token ? token.length : 0,
       path: req.path,
-      method: req.method
+      method: req.method,
+      url: req.url
     });
     
     if (!token) {

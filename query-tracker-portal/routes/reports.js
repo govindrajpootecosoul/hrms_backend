@@ -89,8 +89,11 @@ router.get('/:type', auth, async (req, res) => {
 
     res.json({ data: formattedData, count: formattedData.length });
   } catch (error) {
-    console.error(error);
-    res.status(500).json({ message: 'Server error' });
+    console.error('[Reports Route Error]', error);
+    res.status(500).json({ 
+      message: 'Server error',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
   }
 });
 
@@ -150,8 +153,11 @@ router.get('/:type/excel', auth, async (req, res) => {
     res.setHeader('Content-Disposition', `attachment; filename=${type}_queries_${Date.now()}.xlsx`);
     res.send(buffer);
   } catch (error) {
-    console.error(error);
-    res.status(500).json({ message: 'Server error' });
+    console.error('[Reports Route Error]', error);
+    res.status(500).json({ 
+      message: 'Server error',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
   }
 });
 
@@ -225,8 +231,11 @@ router.get('/:type/pdf', auth, async (req, res) => {
 
     doc.end();
   } catch (error) {
-    console.error(error);
-    res.status(500).json({ message: 'Server error' });
+    console.error('[Reports Route Error]', error);
+    res.status(500).json({ 
+      message: 'Server error',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
   }
 });
 
@@ -302,8 +311,11 @@ router.get('/:type/csv', auth, async (req, res) => {
 
     fs.unlinkSync(filePath);
   } catch (error) {
-    console.error(error);
-    res.status(500).json({ message: 'Server error' });
+    console.error('[Reports Route Error]', error);
+    res.status(500).json({ 
+      message: 'Server error',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
   }
 });
 

@@ -4,6 +4,7 @@ require('dotenv').config();
 
 // Shared routes (used by all portals)
 const authRoutes = require('./shared/routes/auth');
+const adminUsersRoutes = require('./shared/routes/admin-users');
 
 // Portal-specific routes
 const hrmsRoutes = require('./hrms-portal/routes');
@@ -38,6 +39,7 @@ app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
 // Shared Routes (used by all portals)
 app.use('/api/auth', authRoutes);
+app.use('/api/admin-users', adminUsersRoutes);
 
 // Portal-specific Routes
 app.use('/api/hrms', hrmsRoutes);
