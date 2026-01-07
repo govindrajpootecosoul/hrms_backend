@@ -113,7 +113,8 @@ router.post('/login', async (req, res) => {
     await connectMongo(LOGIN_DB_NAME);
     const usersCol = await getUsersCollection();
     console.log(`[login] Querying users collection in database: ${LOGIN_DB_NAME}, email: ${email}`);
-    const user = await usersCol.findOne({ email });
+    // Use case-insensitive email matching
+    const user = await usersCol.findOne({ email: { $regex: new RegExp(`^${email.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') } });
 
     if (!user) {
       console.log(`[login] User not found with email: ${email}`);

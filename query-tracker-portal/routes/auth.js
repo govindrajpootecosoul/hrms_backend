@@ -26,8 +26,8 @@ router.post('/login', [
 
     const { email, password } = req.body;
 
-    // Find user
-    const user = await User.findOne({ email });
+    // Find user with case-insensitive email matching
+    const user = await User.findOne({ email: { $regex: new RegExp(`^${email.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') } });
     if (!user) {
       return res.status(401).json({ message: 'Invalid credentials' });
     }
@@ -86,8 +86,8 @@ router.post('/register', [
 
     const { name, email, password, role } = req.body;
 
-    // Check if user already exists
-    const existingUser = await User.findOne({ email });
+    // Check if user already exists (case-insensitive)
+    const existingUser = await User.findOne({ email: { $regex: new RegExp(`^${email.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') } });
     if (existingUser) {
       return res.status(400).json({ message: 'User already exists' });
     }
