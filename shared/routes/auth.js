@@ -109,10 +109,33 @@ router.post('/login', async (req, res) => {
       });
     }
 
-    // Connect to login database (ecosoul_project_tracker)
+    // Validate email domain
+    const emailLower = email.toLowerCase();
+    if (!emailLower.endsWith('@thrivebrands.ai') && !emailLower.endsWith('@ecosoulhome.com')) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid email domain. Email must end with @thrivebrands.ai or @ecosoulhome.com'
+      });
+    }
+
+    // Connect to login database (Employees_List)
     await connectMongo(LOGIN_DB_NAME);
-    const usersCol = await getUsersCollection();
-    console.log(`[login] Querying users collection in database: ${LOGIN_DB_NAME}, email: ${email}`);
+    
+    // Get the appropriate collection based on email domain
+    let usersCol;
+    let collectionName;
+    try {
+      usersCol = await getUsersCollection(email);
+      collectionName = emailLower.endsWith('@thrivebrands.ai') ? 'Thrive_Employees' : 'Ecosoul_Employees';
+      console.log(`[login] Querying ${collectionName} collection in database: ${LOGIN_DB_NAME}, email: ${email}`);
+    } catch (error) {
+      console.error(`[login] Error getting collection: ${error.message}`);
+      return res.status(400).json({
+        success: false,
+        error: error.message || 'Invalid email domain'
+      });
+    }
+    
     // Use case-insensitive email matching
     const user = await usersCol.findOne({ email: { $regex: new RegExp(`^${email.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') } });
 
@@ -208,9 +231,21 @@ router.get('/verify', async (req, res) => {
       process.env.JWT_SECRET || 'your-secret-key-change-in-production'
     );
 
-    // Connect to login database (ecosoul_project_tracker)
+    // Connect to login database (Employees_List)
     await connectMongo(LOGIN_DB_NAME);
-    const usersCol = await getUsersCollection();
+    
+    // Get the appropriate collection based on email from token
+    const userEmail = decoded.email;
+    if (!userEmail) {
+      return res.status(401).json({
+        success: false,
+        error: 'Invalid token: email not found'
+      });
+    }
+    
+    const usersCol = await getUsersCollection(userEmail);
+    const collectionName = userEmail.toLowerCase().endsWith('@thrivebrands.ai') ? 'Thrive_Employees' : 'Ecosoul_Employees';
+    console.log(`[verify] Querying ${collectionName} collection in database: ${LOGIN_DB_NAME}, email: ${userEmail}`);
 
     const user = await usersCol.findOne({ _id: new ObjectId(decoded.userId) });
 

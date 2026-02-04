@@ -218,18 +218,22 @@ router.put('/:id', auth, async (req, res) => {
 
 // @route   DELETE /api/queries/:id
 // @desc    Delete a query
-// @access  Private/Admin
+// @access  Private (Admin or Query Creator)
 router.delete('/:id', auth, async (req, res) => {
   try {
-    if (req.user.role !== 'admin') {
-      return res.status(403).json({ message: 'Only admins can delete queries' });
-    }
-
-    const query = await Query.findByIdAndDelete(req.params.id);
+    const query = await Query.findById(req.params.id);
 
     if (!query) {
       return res.status(404).json({ message: 'Query not found' });
     }
+
+    // Check access: user can only delete their own queries, admin can delete any
+    if (req.user.role !== 'admin' && 
+        query.createdBy.toString() !== req.user._id.toString()) {
+      return res.status(403).json({ message: 'You can only delete your own queries' });
+    }
+
+    await Query.findByIdAndDelete(req.params.id);
 
     res.json({ message: 'Query deleted successfully' });
   } catch (error) {

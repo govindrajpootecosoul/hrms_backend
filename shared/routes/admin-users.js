@@ -28,16 +28,109 @@ const PORTAL_DISPLAY_NAMES = {
   'demand-panel': 'Demand / Panel'
 };
 
+/**
+ * Check if a user is a dummy/test user
+ * @param {Object} user - User object
+ * @returns {boolean} - True if user is dummy/test user
+ */
+function isDummyUser(user) {
+  const email = (user.email || '').toLowerCase();
+  const name = (user.name || '').toLowerCase();
+  
+  // Common dummy/test patterns
+  const dummyEmailPatterns = [
+    'test@',
+    'dummy@',
+    'example@',
+    'sample@',
+    'demo@',
+    '@test.',
+    '@example.',
+    '@dummy.',
+    'admin@test',
+    'user@test',
+    'testuser@',
+    'dummyuser@'
+  ];
+  
+  const dummyNamePatterns = [
+    'test user',
+    'dummy user',
+    'example user',
+    'sample user',
+    'demo user',
+    'test account',
+    'dummy account',
+    'test data',
+    'testuser',
+    'dummyuser',
+    'testadmin',
+    'test admin'
+  ];
+  
+  // Check email patterns
+  const isDummyEmail = dummyEmailPatterns.some(pattern => email.includes(pattern));
+  
+  // Check name patterns
+  const isDummyName = dummyNamePatterns.some(pattern => name.includes(pattern));
+  
+  // Also check if email is very short or suspicious
+  const isSuspiciousEmail = email.length < 5 || email.split('@').length !== 2;
+  
+  return isDummyEmail || isDummyName || isSuspiciousEmail;
+}
+
 // @route   GET /api/admin-users
-// @desc    Get all users for admin portal
+// @desc    Get all users for admin portal (from Employees_List database)
 // @access  Private/Admin
+// @query   filterDummy - Optional: set to 'true' to filter out dummy/test users
+// @query   company - Optional: filter users by company name (e.g., 'Ecosoul Home', 'Thrive')
 router.get('/', async (req, res) => {
   try {
-    const usersCol = await getUsersCollection();
-    const users = await usersCol.find({}).toArray();
+    const { filterDummy, company } = req.query;
+    const shouldFilterDummy = filterDummy === 'true';
+    
+    // Get the appropriate collection based on company name
+    // If company is provided, use company-specific collection
+    // If no company is provided, we'll need to query both collections or use a default
+    let usersCol;
+    let collectionName;
+    
+    if (company) {
+      // Use company name to get the appropriate collection
+      usersCol = await getUsersCollection(null, company);
+      collectionName = company.toLowerCase().includes('thrive') ? 'Thrive_Employees' : 'Ecosoul_Employees';
+    } else {
+      // If no company specified, default to Ecosoul for backward compatibility
+      // In the future, we might want to query both collections and merge results
+      usersCol = await getUsersCollection(null, 'Ecosoul Home');
+      collectionName = 'Ecosoul_Employees';
+    }
+    
+    // Build query object (no need to filter by company field since we're already in the right collection)
+    const query = {};
+    
+    // Fetch users from the appropriate collection
+    const allUsers = await usersCol.find(query).toArray();
+    
+    console.log(`[admin-users] Fetched ${allUsers.length} total users from ${collectionName} collection in ${LOGIN_DB_NAME} database${company ? ` for company: ${company}` : ''}`);
+    
+    // By default, show ALL users. Only filter if explicitly requested
+    let usersToReturn = allUsers;
+    let dummyCount = 0;
+    
+    if (shouldFilterDummy) {
+      usersToReturn = allUsers.filter(user => !isDummyUser(user));
+      dummyCount = allUsers.length - usersToReturn.length;
+      if (dummyCount > 0) {
+        console.log(`[admin-users] Filtered out ${dummyCount} dummy/test users`);
+      }
+    } else {
+      console.log(`[admin-users] Showing all ${allUsers.length} users from database`);
+    }
     
     // Transform users to include portals array (default to empty if not present)
-    const transformedUsers = users.map(user => ({
+    const transformedUsers = usersToReturn.map(user => ({
       id: user._id?.toString(),
       _id: user._id?.toString(),
       name: user.name || '',
@@ -53,9 +146,25 @@ router.get('/', async (req, res) => {
       updatedAt: user.updatedAt
     }));
 
+    // Log response details
+    console.log(`[admin-users] Returning ${transformedUsers.length} users to frontend`);
+    if (transformedUsers.length > 0) {
+      console.log(`[admin-users] Sample user:`, {
+        id: transformedUsers[0].id,
+        name: transformedUsers[0].name,
+        email: transformedUsers[0].email,
+        employeeId: transformedUsers[0].employeeId
+      });
+    }
+
     res.json({
       success: true,
-      users: transformedUsers
+      users: transformedUsers,
+      total: transformedUsers.length,
+      filtered: dummyCount,
+      database: LOGIN_DB_NAME, // Show which database was used
+      collection: collectionName || 'users',
+      message: `Fetched ${transformedUsers.length} users from ${collectionName || 'users'} collection in ${LOGIN_DB_NAME} database`
     });
   } catch (error) {
     console.error('[Admin Users GET Error]', error);
@@ -118,9 +227,11 @@ router.get('/:id', async (req, res) => {
 // @route   POST /api/admin-users
 // @desc    Create a new user
 // @access  Private/Admin
+// @query   company - Optional: company name to determine collection (e.g., 'Ecosoul Home', 'Thrive')
 router.post('/', async (req, res) => {
   try {
     const { name, email, password, active, portals, role } = req.body;
+    const { company } = req.query; // Get company from query parameter
 
     // Validation
     if (!name || !email || !password) {
@@ -147,7 +258,8 @@ router.post('/', async (req, res) => {
       });
     }
 
-    const usersCol = await getUsersCollection();
+    // Get the appropriate collection based on company
+    const usersCol = await getUsersCollection(null, company);
 
     // Check if user already exists
     const existingUser = await usersCol.findOne({ email: email.toLowerCase() });
@@ -202,10 +314,12 @@ router.post('/', async (req, res) => {
 // @route   PUT /api/admin-users/:id
 // @desc    Update a user
 // @access  Private/Admin
+// @query   company - Optional: company name to determine collection (e.g., 'Ecosoul Home', 'Thrive')
 router.put('/:id', async (req, res) => {
   try {
     const { id } = req.params;
     const { name, email, password, active, portals, role } = req.body;
+    const { company } = req.query; // Get company from query parameter
 
     if (!ObjectId.isValid(id)) {
       return res.status(400).json({
@@ -214,7 +328,8 @@ router.put('/:id', async (req, res) => {
       });
     }
 
-    const usersCol = await getUsersCollection();
+    // Get the appropriate collection based on company
+    const usersCol = await getUsersCollection(null, company);
 
     // Check if user exists
     const existingUser = await usersCol.findOne({ _id: new ObjectId(id) });
@@ -304,9 +419,11 @@ router.put('/:id', async (req, res) => {
 // @route   DELETE /api/admin-users/:id
 // @desc    Delete a user (soft delete by setting isActive to false)
 // @access  Private/Admin
+// @query   company - Optional: company name to determine collection (e.g., 'Ecosoul Home', 'Thrive')
 router.delete('/:id', async (req, res) => {
   try {
     const { id } = req.params;
+    const { company } = req.query; // Get company from query parameter
 
     if (!ObjectId.isValid(id)) {
       return res.status(400).json({
@@ -315,7 +432,8 @@ router.delete('/:id', async (req, res) => {
       });
     }
 
-    const usersCol = await getUsersCollection();
+    // Get the appropriate collection based on company
+    const usersCol = await getUsersCollection(null, company);
 
     // Check if user exists
     const existingUser = await usersCol.findOne({ _id: new ObjectId(id) });
@@ -353,9 +471,11 @@ router.delete('/:id', async (req, res) => {
 // @route   PATCH /api/admin-users/:id/toggle-active
 // @desc    Toggle user active status
 // @access  Private/Admin
+// @query   company - Optional: company name to determine collection (e.g., 'Ecosoul Home', 'Thrive')
 router.patch('/:id/toggle-active', async (req, res) => {
   try {
     const { id } = req.params;
+    const { company } = req.query; // Get company from query parameter
 
     if (!ObjectId.isValid(id)) {
       return res.status(400).json({
@@ -364,7 +484,8 @@ router.patch('/:id/toggle-active', async (req, res) => {
       });
     }
 
-    const usersCol = await getUsersCollection();
+    // Get the appropriate collection based on company
+    const usersCol = await getUsersCollection(null, company);
 
     // Check if user exists
     const existingUser = await usersCol.findOne({ _id: new ObjectId(id) });
@@ -402,13 +523,62 @@ router.patch('/:id/toggle-active', async (req, res) => {
   }
 });
 
+// @route   GET /api/admin-users/debug/info
+// @desc    Get debug information about users database
+// @access  Private/Admin
+router.get('/debug/info', async (req, res) => {
+  try {
+    const usersCol = await getUsersCollection();
+    
+    // Get total count
+    const totalCount = await usersCol.countDocuments({});
+    
+    // Get sample users (first 5)
+    const sampleUsers = await usersCol.find({}).limit(5).toArray();
+    
+    // Get users with employeeId
+    const usersWithEmployeeId = await usersCol.countDocuments({ employeeId: { $exists: true, $ne: null } });
+    
+    // Get active users
+    const activeUsers = await usersCol.countDocuments({ isActive: { $ne: false } });
+    
+    res.json({
+      success: true,
+      database: LOGIN_DB_NAME,
+      collection: 'users',
+      stats: {
+        totalUsers: totalCount,
+        usersWithEmployeeId: usersWithEmployeeId,
+        activeUsers: activeUsers,
+        inactiveUsers: totalCount - activeUsers
+      },
+      sampleUsers: sampleUsers.map(user => ({
+        _id: user._id?.toString(),
+        name: user.name,
+        email: user.email,
+        employeeId: user.employeeId,
+        isActive: user.isActive,
+        role: user.role
+      }))
+    });
+  } catch (error) {
+    console.error('[Admin Users Debug Error]', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to get debug info'
+    });
+  }
+});
+
 // @route   PATCH /api/admin-users/:id/portals
 // @desc    Update user portals
 // @access  Private/Admin
+// @query   company - Optional: company name to determine collection (e.g., 'Ecosoul Home', 'Thrive')
 router.patch('/:id/portals', async (req, res) => {
   try {
     const { id } = req.params;
     const { portals } = req.body;
+    const { company } = req.query; // Get company from query parameter
 
     if (!ObjectId.isValid(id)) {
       return res.status(400).json({
@@ -424,7 +594,8 @@ router.patch('/:id/portals', async (req, res) => {
       });
     }
 
-    const usersCol = await getUsersCollection();
+    // Get the appropriate collection based on company
+    const usersCol = await getUsersCollection(null, company);
 
     // Check if user exists
     const existingUser = await usersCol.findOne({ _id: new ObjectId(id) });

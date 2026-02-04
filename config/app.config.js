@@ -4,7 +4,13 @@ require('dotenv').config();
  * Centralized Application Configuration
  * All IPs, URLs, and Ports are managed here
  * DO NOT hardcode any IPs, URLs, or ports in other files
+ * 
+ * ⚠️ IMPORTANT: MongoDB configuration is now in config/database.config.js
+ * Update MongoDB settings there to apply across all portals
  */
+
+// Import centralized database configuration
+const { MONGODB_CONFIG, getMongoUri: getDbMongoUri, getDatabaseName, getCollectionName } = require('./database.config');
 
 const config = {
   // Server Ports
@@ -14,15 +20,16 @@ const config = {
     queryTracker: parseInt(process.env.QUERY_TRACKER_PORT) || 5009,
   },
 
-  // MongoDB Configuration
+  // MongoDB Configuration (now uses centralized config)
   mongodb: {
-    host: process.env.MONGO_HOST || 'localhost',
-    port: parseInt(process.env.MONGO_PORT) || 27017,
-    uri: process.env.MONGO_URI || null, // If set, will override host:port
-    loginDbName: process.env.MONGO_LOGIN_DB_NAME || 'ecosoul_project_tracker',
-    employeeDbName: process.env.MONGO_DB_NAME || (process.env.NODE_ENV === 'production' ? 'hrms_prod' : 'Employee'),
-    queryTrackerDbName: process.env.QUERY_TRACKER_DB_NAME || 'query_tracker',
-    usersCollection: process.env.MONGO_USERS_COLLECTION || 'users',
+    host: MONGODB_CONFIG.host,
+    port: MONGODB_CONFIG.port,
+    uri: MONGODB_CONFIG.uri,
+    loginDbName: getDatabaseName('login'),
+    employeeDbName: getDatabaseName('employee'),
+    queryTrackerDbName: getDatabaseName('queryTracker'),
+    assetTrackerDbName: getDatabaseName('assetTracker'),
+    usersCollection: getCollectionName('users'),
   },
 
   // MySQL Configuration
@@ -59,23 +66,9 @@ const config = {
   },
 };
 
-// Helper function to get MongoDB URI
+// Helper function to get MongoDB URI (uses centralized config)
 function getMongoUri(databaseName = null) {
-  if (config.mongodb.uri) {
-    // If MONGO_URI is explicitly set, use it
-    if (databaseName) {
-      // Append database name if not already in URI
-      const uri = config.mongodb.uri.endsWith('/') 
-        ? config.mongodb.uri 
-        : config.mongodb.uri + '/';
-      return uri + databaseName;
-    }
-    return config.mongodb.uri;
-  }
-  
-  // Construct URI from host and port
-  const baseUri = `mongodb://${config.mongodb.host}:${config.mongodb.port}/`;
-  return databaseName ? baseUri + databaseName : baseUri;
+  return getDbMongoUri(databaseName);
 }
 
 // Helper function to get backend URL

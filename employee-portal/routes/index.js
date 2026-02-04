@@ -1,10 +1,17 @@
 const express = require('express');
 const router = express.Router();
-const { connectMongo, getDb } = require('../../config/mongo');
+const { connectMongo, getDb, getEmployeePortalDb } = require('../../config/mongo');
+
+/**
+ * Get company from request (query parameter or header)
+ */
+function getCompanyFromRequest(req) {
+  return req.query.company || req.headers['x-company'] || null;
+}
 
 // Helper: ensure a single doc exists per employeeId/type
-async function getOrCreateDoc(collectionName, filter, defaultDoc) {
-  const db = await getDb();
+async function getOrCreateDoc(collectionName, filter, defaultDoc, company = null) {
+  const db = company ? await getEmployeePortalDb(company) : await getDb();
   const col = db.collection(collectionName);
   let doc = await col.findOne(filter);
   if (!doc) {
@@ -146,7 +153,8 @@ router.get('/dashboard', async (req, res) => {
   try {
     await connectMongo();
     const employeeId = req.query.employeeId || 'default';
-    const doc = await getOrCreateDoc('portal_dashboard', { employeeId }, defaultDashboard(employeeId));
+    const company = getCompanyFromRequest(req);
+    const doc = await getOrCreateDoc('portal_dashboard', { employeeId }, defaultDashboard(employeeId), company);
     return res.json({ success: true, data: doc });
   } catch (err) {
     console.error('Dashboard error:', err);
@@ -159,7 +167,8 @@ router.get('/attendance', async (req, res) => {
   try {
     await connectMongo();
     const employeeId = req.query.employeeId || 'default';
-    const doc = await getOrCreateDoc('portal_attendance', { employeeId }, defaultAttendance(employeeId));
+    const company = getCompanyFromRequest(req);
+    const doc = await getOrCreateDoc('portal_attendance', { employeeId }, defaultAttendance(employeeId), company);
     return res.json({ success: true, data: doc });
   } catch (err) {
     console.error('Attendance error:', err);
@@ -172,7 +181,8 @@ router.get('/requests', async (req, res) => {
   try {
     await connectMongo();
     const employeeId = req.query.employeeId || 'default';
-    const doc = await getOrCreateDoc('portal_requests', { employeeId }, defaultRequests(employeeId));
+    const company = getCompanyFromRequest(req);
+    const doc = await getOrCreateDoc('portal_requests', { employeeId }, defaultRequests(employeeId), company);
     return res.json({ success: true, data: doc });
   } catch (err) {
     console.error('Requests error:', err);
@@ -181,10 +191,11 @@ router.get('/requests', async (req, res) => {
 });
 
 // Org data
-router.get('/org', async (_req, res) => {
+router.get('/org', async (req, res) => {
   try {
     await connectMongo();
-    const doc = await getOrCreateDoc('portal_org', { key: 'org' }, defaultOrg());
+    const company = getCompanyFromRequest(req);
+    const doc = await getOrCreateDoc('portal_org', { key: 'org' }, defaultOrg(), company);
     return res.json({ success: true, data: doc });
   } catch (err) {
     console.error('Org error:', err);
@@ -193,10 +204,11 @@ router.get('/org', async (_req, res) => {
 });
 
 // Reports data
-router.get('/reports', async (_req, res) => {
+router.get('/reports', async (req, res) => {
   try {
     await connectMongo();
-    const doc = await getOrCreateDoc('portal_reports', { key: 'reports' }, defaultReports());
+    const company = getCompanyFromRequest(req);
+    const doc = await getOrCreateDoc('portal_reports', { key: 'reports' }, defaultReports(), company);
     return res.json({ success: true, data: doc });
   } catch (err) {
     console.error('Reports error:', err);
@@ -209,14 +221,16 @@ router.post('/checkin', async (req, res) => {
   try {
     await connectMongo();
     const { employeeId } = req.body;
+    const company = getCompanyFromRequest(req);
     
     if (!employeeId) {
       return res.status(400).json({ success: false, error: 'Employee ID is required' });
     }
 
-    console.log(`[checkin] Employee ${employeeId} attempting to check in`);
+    console.log(`[checkin] Employee ${employeeId} attempting to check in${company ? ` (Company: ${company})` : ''}`);
 
-    const db = await getDb();
+    // Get company-specific database
+    const db = company ? await getEmployeePortalDb(company) : await getDb();
     const col = db.collection('employee_checkins');
     const today = new Date().toISOString().split('T')[0];
     
@@ -270,14 +284,16 @@ router.post('/checkout', async (req, res) => {
   try {
     await connectMongo();
     const { employeeId } = req.body;
+    const company = getCompanyFromRequest(req);
     
     if (!employeeId) {
       return res.status(400).json({ success: false, error: 'Employee ID is required' });
     }
 
-    console.log(`[checkout] Employee ${employeeId} attempting to check out`);
+    console.log(`[checkout] Employee ${employeeId} attempting to check out${company ? ` (Company: ${company})` : ''}`);
 
-    const db = await getDb();
+    // Get company-specific database
+    const db = company ? await getEmployeePortalDb(company) : await getDb();
     const col = db.collection('employee_checkins');
     const today = new Date().toISOString().split('T')[0];
     
@@ -336,12 +352,14 @@ router.get('/checkin/status', async (req, res) => {
   try {
     await connectMongo();
     const employeeId = req.query.employeeId;
+    const company = getCompanyFromRequest(req);
     
     if (!employeeId) {
       return res.status(400).json({ success: false, error: 'Employee ID is required' });
     }
 
-    const db = await getDb();
+    // Get company-specific database
+    const db = company ? await getEmployeePortalDb(company) : await getDb();
     const col = db.collection('employee_checkins');
     const today = new Date().toISOString().split('T')[0];
     
@@ -400,12 +418,14 @@ router.get('/checkin/history', async (req, res) => {
     await connectMongo();
     const employeeId = req.query.employeeId;
     const limit = parseInt(req.query.limit) || 30; // Default to last 30 records
+    const company = getCompanyFromRequest(req);
     
     if (!employeeId) {
       return res.status(400).json({ success: false, error: 'Employee ID is required' });
     }
 
-    const db = await getDb();
+    // Get company-specific database
+    const db = company ? await getEmployeePortalDb(company) : await getDb();
     const col = db.collection('employee_checkins');
     
     const history = await col

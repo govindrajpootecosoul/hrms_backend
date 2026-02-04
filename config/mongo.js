@@ -1,5 +1,6 @@
 const { MongoClient } = require('mongodb');
 const { config, getMongoUri } = require('./app.config');
+const { MONGODB_CONFIG, getDatabaseName } = require('./database.config');
 
 // MongoDB connection URI - supports both dev and production
 // If MONGO_URI is set, use it. Otherwise, use non-authenticated connection
@@ -9,6 +10,30 @@ const MONGO_URI = getMongoUri();
 const LOGIN_DB_NAME = config.mongodb.loginDbName;
 const EMPLOYEE_DB_NAME = config.mongodb.employeeDbName;
 const USERS_COLLECTION = config.mongodb.usersCollection;
+
+// Portal configuration - defines database and collections for each portal
+const PORTAL_CONFIG = {
+  'hrms-portal': {
+    database: getDatabaseName('hrms'),
+    collections: ['employees', 'attendance', 'leaves', 'departments', 'designations', 'recruitment']
+  },
+  'asset-tracker-portal': {
+    database: getDatabaseName('assetTracker'),
+    collections: ['assets', 'asset_categories', 'asset_assignments', 'asset_history', 'companies']
+  },
+  'finance-portal': {
+    database: getDatabaseName('finance'),
+    collections: ['invoices', 'transactions', 'expenses', 'budgets', 'financial_reports']
+  },
+  'employee-portal': {
+    database: getDatabaseName('employee'),
+    collections: ['dashboard', 'requests', 'announcements', 'documents', 'payroll']
+  },
+  'query-tracker-portal': {
+    database: getDatabaseName('queryTracker'),
+    collections: ['queries', 'users', 'reports'] // Note: query-tracker has its own setup
+  }
+};
 
 let client;
 let loginDb;
@@ -140,6 +165,30 @@ async function connectMongo(dbName = null) {
   }
 }
 
+/**
+ * Get company-specific database for employee portal
+ * @param {string} company - Company name: 'Thrive' or 'Ecosoul Home'
+ * @returns {Promise<Db>} Company-specific database
+ */
+async function getEmployeePortalDb(company = null) {
+  await ensureConnection();
+  
+  if (!company) {
+    // Default to base employee database if no company specified
+    if (!employeeDb) {
+      employeeDb = client.db(EMPLOYEE_DB_NAME);
+    }
+    return employeeDb;
+  }
+  
+  // Get company-specific database name
+  const { getCompanyDatabaseName } = require('./database.config');
+  const companyDbName = getCompanyDatabaseName('employee', company);
+  
+  // Return company-specific database
+  return client.db(companyDbName);
+}
+
 async function getDb(dbName = null) {
   // Ensure connection before getting database
   await ensureConnection();
@@ -159,16 +208,154 @@ async function getDb(dbName = null) {
   }
 }
 
-async function getUsersCollection() {
-  // For login, always use ecosoul_project_tracker database
+/**
+ * Get the employee collection name based on email domain or company name
+ * @param {string} email - User email address (optional)
+ * @param {string} company - Company name: 'Thrive' or 'Ecosoul Home' (optional)
+ * @returns {string} Collection name (Thrive_Employees or Ecosoul_Employees)
+ */
+function getEmployeeCollectionName(email = null, company = null) {
+  // If company name is provided, use it directly
+  if (company) {
+    const companyLower = company.toLowerCase();
+    if (companyLower.includes('thrive')) {
+      return 'Thrive_Employees';
+    } else if (companyLower.includes('ecosoul')) {
+      return 'Ecosoul_Employees';
+    }
+  }
+  
+  // If email is provided, determine from email domain
+  if (email) {
+    const emailLower = email.toLowerCase();
+    
+    if (emailLower.endsWith('@thrivebrands.ai')) {
+      return 'Thrive_Employees';
+    } else if (emailLower.endsWith('@ecosoulhome.com')) {
+      return 'Ecosoul_Employees';
+    }
+  }
+  
+  // If neither provided, throw error
+  throw new Error('Either email or company name is required to determine collection');
+}
+
+async function getUsersCollection(email = null, company = null) {
+  // For login, use the configured login database (Employees_List)
   const db = await getDb(LOGIN_DB_NAME);
+  
+  // If email or company is provided, determine collection based on domain or company name
+  if (email || company) {
+    const collectionName = getEmployeeCollectionName(email, company);
+    return db.collection(collectionName);
+  }
+  
+  // Default to users collection if no email/company provided (for backward compatibility)
   return db.collection(USERS_COLLECTION);
+}
+
+/**
+ * Initialize database and collections for a specific portal
+ * @param {string} portalName - Portal name (e.g., 'hrms-portal', 'asset-tracker-portal')
+ * @returns {Promise<void>}
+ */
+async function initializePortalDatabase(portalName) {
+  try {
+    await ensureConnection();
+    
+    const portalConfig = PORTAL_CONFIG[portalName];
+    if (!portalConfig) {
+      console.warn(`⚠️  [portal-setup] No configuration found for portal: ${portalName}`);
+      return;
+    }
+
+    const dbName = portalConfig.database;
+    const collections = portalConfig.collections;
+
+    // Get or create database (MongoDB creates databases automatically when first collection is created)
+    const db = client.db(dbName);
+    
+    // Check existing collections
+    const existingCollections = await db.listCollections().toArray();
+    const existingCollectionNames = existingCollections.map(col => col.name);
+    
+    // Create collections that don't exist
+    for (const collectionName of collections) {
+      if (!existingCollectionNames.includes(collectionName)) {
+        try {
+          // Create collection by inserting an empty document and then deleting it
+          // This ensures the collection exists
+          const collection = db.collection(collectionName);
+          await collection.insertOne({ _initialized: true, createdAt: new Date() });
+          await collection.deleteOne({ _initialized: true });
+          console.log(`✅ [portal-setup] Created collection '${collectionName}' in database '${dbName}'`);
+        } catch (err) {
+          // If insert fails, try creating collection directly
+          try {
+            await db.createCollection(collectionName);
+            console.log(`✅ [portal-setup] Created collection '${collectionName}' in database '${dbName}'`);
+          } catch (createErr) {
+            console.error(`❌ [portal-setup] Failed to create collection '${collectionName}': ${createErr.message}`);
+          }
+        }
+      } else {
+        console.log(`ℹ️  [portal-setup] Collection '${collectionName}' already exists in database '${dbName}'`);
+      }
+    }
+    
+    console.log(`✅ [portal-setup] Portal '${portalName}' database '${dbName}' initialized with ${collections.length} collections`);
+  } catch (error) {
+    console.error(`❌ [portal-setup] Failed to initialize portal '${portalName}': ${error.message}`);
+    throw error;
+  }
+}
+
+/**
+ * Initialize all portal databases and collections
+ * @returns {Promise<void>}
+ */
+async function initializeAllPortals() {
+  try {
+    await ensureConnection();
+    console.log(`\n📦 [portal-setup] Initializing all portal databases and collections...\n`);
+    
+    // Also ensure login database has users collection
+    const loginDb = client.db(LOGIN_DB_NAME);
+    const loginCollections = await loginDb.listCollections().toArray();
+    const loginCollectionNames = loginCollections.map(col => col.name);
+    
+    if (!loginCollectionNames.includes(USERS_COLLECTION)) {
+      try {
+        const usersCol = loginDb.collection(USERS_COLLECTION);
+        await usersCol.insertOne({ _initialized: true, createdAt: new Date() });
+        await usersCol.deleteOne({ _initialized: true });
+        console.log(`✅ [portal-setup] Created collection '${USERS_COLLECTION}' in login database '${LOGIN_DB_NAME}'`);
+      } catch (err) {
+        console.error(`❌ [portal-setup] Failed to create users collection: ${err.message}`);
+      }
+    }
+    
+    // Initialize each portal
+    for (const portalName of Object.keys(PORTAL_CONFIG)) {
+      await initializePortalDatabase(portalName);
+    }
+    
+    console.log(`\n✅ [portal-setup] All portal databases and collections initialized successfully!\n`);
+  } catch (error) {
+    console.error(`❌ [portal-setup] Failed to initialize portals: ${error.message}`);
+    throw error;
+  }
 }
 
 module.exports = {
   connectMongo,
   getDb,
+  getEmployeePortalDb,
   getUsersCollection,
+  getEmployeeCollectionName,
+  initializePortalDatabase,
+  initializeAllPortals,
+  PORTAL_CONFIG,
   LOGIN_DB_NAME,
   EMPLOYEE_DB_NAME,
 };

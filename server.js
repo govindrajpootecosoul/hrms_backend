@@ -94,9 +94,17 @@ app.use((err, req, res, next) => {
 async function startServer() {
   // Test MongoDB connection on startup
   try {
-    const { connectMongo } = require('./config/mongo');
+    const { connectMongo, initializeAllPortals } = require('./config/mongo');
     await connectMongo();
     console.log('✅ MongoDB connected successfully');
+    
+    // Initialize all portal databases and collections
+    try {
+      await initializeAllPortals();
+    } catch (initErr) {
+      console.error('⚠️  Portal initialization warning:', initErr.message);
+      console.log('   Server will continue, but some portal features may not work until databases are created');
+    }
   } catch (err) {
     console.error('⚠️  MongoDB connection warning:', err.message);
     console.log('   Server will start, but MongoDB features may not work until connection is established');
