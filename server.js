@@ -3,7 +3,9 @@ const cors = require('cors');
 require('dotenv').config();
 
 // Import centralized config
-const { config, ports, getMongoUri, getBackendUrl } = require('./config/app.config');
+const { config, ports, getMongoUri, getBackendUrl: getAppBackendUrl } = require('./config/app.config');
+// Import network config (single source of truth for network settings)
+const { networkConfig, getBackendUrl, getApiUrl, backendPort } = require('./config/network.config');
 
 // Shared routes (used by all portals)
 const authRoutes = require('./shared/routes/auth');
@@ -20,7 +22,8 @@ const queryTrackerRoutes = require('./query-tracker-portal/routes');
 // const autoSetupDatabase = require('./utils/autoSetup');
 
 const app = express();
-const PORT = ports.backend;
+// Use port from network.config.js (single source of truth)
+const PORT = backendPort;
 
 // Middleware
 // CORS configuration - allow all origins for development
@@ -130,8 +133,11 @@ async function startServer() {
   }
   
   // Start server
-  app.listen(PORT, () => {
+  // Listen on all interfaces (0.0.0.0) to allow network access
+  app.listen(PORT, '0.0.0.0', () => {
     console.log(`🚀 Server running on ${getBackendUrl()}`);
+    console.log(`   Network IP: ${networkConfig.serverIp}`);
+    console.log(`   Port: ${PORT}`);
     console.log(`📝 Using MongoDB for employee portal and authentication`);
     console.log(`   Login DB: ${config.mongodb.loginDbName}`);
     console.log(`   Employee Portal DB: ${config.mongodb.employeeDbName}`);

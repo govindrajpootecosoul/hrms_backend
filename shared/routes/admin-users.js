@@ -129,7 +129,7 @@ router.get('/', async (req, res) => {
       console.log(`[admin-users] Showing all ${allUsers.length} users from database`);
     }
     
-    // Transform users to include portals array (default to empty if not present)
+    // Transform users to include all fields
     const transformedUsers = usersToReturn.map(user => ({
       id: user._id?.toString(),
       _id: user._id?.toString(),
@@ -139,9 +139,38 @@ router.get('/', async (req, res) => {
       active: user.isActive !== false, // Default to true if not set
       portals: user.portals || [], // Array of portal names
       role: user.role || 'user',
-      employeeId: user.employeeId,
-      department: user.department,
-      company: user.company,
+      employeeId: user.employeeId || '',
+      department: user.department || '',
+      company: user.company || '',
+      hasCredentialAccess: user.hasCredentialAccess !== false,
+      hasSubscriptionAccess: user.hasSubscriptionAccess !== false,
+      
+      // Personal details
+      phone: user.phone || '',
+      dateOfBirth: user.dateOfBirth || '',
+      gender: user.gender || '',
+      address: user.address || '',
+      city: user.city || '',
+      state: user.state || '',
+      zipCode: user.zipCode || '',
+      emergencyContact: user.emergencyContact || '',
+      emergencyPhone: user.emergencyPhone || '',
+      
+      // Work details
+      jobTitle: user.jobTitle || '',
+      location: user.location || '',
+      reportingManager: user.reportingManager || '',
+      joiningDate: user.joiningDate || '',
+      
+      // Bank & Insurance
+      bankAccount: user.bankAccount || '',
+      ifsc: user.ifsc || '',
+      pan: user.pan || '',
+      aadhaar: user.aadhaar || '',
+      uan: user.uan || '',
+      esiNo: user.esiNo || '',
+      pfNo: user.pfNo || '',
+      
       createdAt: user.createdAt,
       updatedAt: user.updatedAt
     }));
@@ -210,9 +239,11 @@ router.get('/:id', async (req, res) => {
         active: user.isActive !== false,
         portals: user.portals || [],
         role: user.role || 'user',
-        employeeId: user.employeeId,
-        department: user.department,
-        company: user.company
+        employeeId: user.employeeId || '',
+        department: user.department || '',
+        company: user.company || '',
+        hasCredentialAccess: user.hasCredentialAccess !== false,
+        hasSubscriptionAccess: user.hasSubscriptionAccess !== false
       }
     });
   } catch (error) {
@@ -230,8 +261,17 @@ router.get('/:id', async (req, res) => {
 // @query   company - Optional: company name to determine collection (e.g., 'Ecosoul Home', 'Thrive')
 router.post('/', async (req, res) => {
   try {
-    const { name, email, password, active, portals, role } = req.body;
-    const { company } = req.query; // Get company from query parameter
+    const { 
+      name, email, password, active, portals, role, employeeId, department, company: companyField, 
+      hasCredentialAccess, hasSubscriptionAccess,
+      // Personal details
+      phone, dateOfBirth, gender, address, city, state, zipCode, emergencyContact, emergencyPhone,
+      // Work details
+      jobTitle, location, reportingManager, joiningDate,
+      // Bank & Insurance
+      bankAccount, ifsc, pan, aadhaar, uan, esiNo, pfNo
+    } = req.body;
+    const { company } = req.query; // Get company from query parameter (for collection selection)
 
     // Validation
     if (!name || !email || !password) {
@@ -273,7 +313,7 @@ router.post('/', async (req, res) => {
     // Hash password
     const hashedPassword = await bcrypt.hash(password, 10);
 
-    // Create user object
+    // Create user object with all fields
     const newUser = {
       name: name.trim(),
       email: email.toLowerCase().trim(),
@@ -281,6 +321,38 @@ router.post('/', async (req, res) => {
       isActive: active !== false, // Default to true
       portals: portals || [], // Array of portal names
       role: role || 'user',
+      employeeId: employeeId || '',
+      department: department || '',
+      company: companyField || company || '',
+      hasCredentialAccess: hasCredentialAccess !== false,
+      hasSubscriptionAccess: hasSubscriptionAccess !== false,
+      
+      // Personal details
+      phone: phone || '',
+      dateOfBirth: dateOfBirth || '',
+      gender: gender || '',
+      address: address || '',
+      city: city || '',
+      state: state || '',
+      zipCode: zipCode || '',
+      emergencyContact: emergencyContact || '',
+      emergencyPhone: emergencyPhone || '',
+      
+      // Work details
+      jobTitle: jobTitle || '',
+      location: location || '',
+      reportingManager: reportingManager || '',
+      joiningDate: joiningDate || '',
+      
+      // Bank & Insurance
+      bankAccount: bankAccount || '',
+      ifsc: ifsc || '',
+      pan: pan || '',
+      aadhaar: aadhaar || '',
+      uan: uan || '',
+      esiNo: esiNo || '',
+      pfNo: pfNo || '',
+      
       createdAt: new Date(),
       updatedAt: new Date()
     };
@@ -299,7 +371,12 @@ router.post('/', async (req, res) => {
         password: '', // Don't send password
         active: newUser.isActive,
         portals: newUser.portals,
-        role: newUser.role
+        role: newUser.role,
+        employeeId: newUser.employeeId,
+        department: newUser.department,
+        company: newUser.company,
+        hasCredentialAccess: newUser.hasCredentialAccess,
+        hasSubscriptionAccess: newUser.hasSubscriptionAccess
       }
     });
   } catch (error) {
@@ -318,7 +395,16 @@ router.post('/', async (req, res) => {
 router.put('/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    const { name, email, password, active, portals, role } = req.body;
+    const { 
+      name, email, password, active, portals, role, employeeId, department, company: companyField, 
+      hasCredentialAccess, hasSubscriptionAccess,
+      // Personal details
+      phone, dateOfBirth, gender, address, city, state, zipCode, emergencyContact, emergencyPhone,
+      // Work details
+      jobTitle, location, reportingManager, joiningDate,
+      // Bank & Insurance
+      bankAccount, ifsc, pan, aadhaar, uan, esiNo, pfNo
+    } = req.body;
     const { company } = req.query; // Get company from query parameter
 
     if (!ObjectId.isValid(id)) {
@@ -340,11 +426,12 @@ router.put('/:id', async (req, res) => {
       });
     }
 
-    // Build update object
+    // Build update object - Only update fields that are provided (partial update)
     const updateData = {
       updatedAt: new Date()
     };
 
+    // Basic fields
     if (name !== undefined) updateData.name = name.trim();
     if (email !== undefined) {
       // Validate email format
@@ -383,6 +470,37 @@ router.put('/:id', async (req, res) => {
     if (active !== undefined) updateData.isActive = active;
     if (portals !== undefined) updateData.portals = portals; // Array of portal names
     if (role !== undefined) updateData.role = role;
+    if (employeeId !== undefined) updateData.employeeId = employeeId;
+    if (department !== undefined) updateData.department = department;
+    if (companyField !== undefined) updateData.company = companyField;
+    if (hasCredentialAccess !== undefined) updateData.hasCredentialAccess = hasCredentialAccess;
+    if (hasSubscriptionAccess !== undefined) updateData.hasSubscriptionAccess = hasSubscriptionAccess;
+    
+    // Personal details - Only update if provided
+    if (phone !== undefined) updateData.phone = phone;
+    if (dateOfBirth !== undefined) updateData.dateOfBirth = dateOfBirth;
+    if (gender !== undefined) updateData.gender = gender;
+    if (address !== undefined) updateData.address = address;
+    if (city !== undefined) updateData.city = city;
+    if (state !== undefined) updateData.state = state;
+    if (zipCode !== undefined) updateData.zipCode = zipCode;
+    if (emergencyContact !== undefined) updateData.emergencyContact = emergencyContact;
+    if (emergencyPhone !== undefined) updateData.emergencyPhone = emergencyPhone;
+    
+    // Work details - Only update if provided
+    if (jobTitle !== undefined) updateData.jobTitle = jobTitle;
+    if (location !== undefined) updateData.location = location;
+    if (reportingManager !== undefined) updateData.reportingManager = reportingManager;
+    if (joiningDate !== undefined) updateData.joiningDate = joiningDate;
+    
+    // Bank & Insurance - Only update if provided
+    if (bankAccount !== undefined) updateData.bankAccount = bankAccount;
+    if (ifsc !== undefined) updateData.ifsc = ifsc;
+    if (pan !== undefined) updateData.pan = pan;
+    if (aadhaar !== undefined) updateData.aadhaar = aadhaar;
+    if (uan !== undefined) updateData.uan = uan;
+    if (esiNo !== undefined) updateData.esiNo = esiNo;
+    if (pfNo !== undefined) updateData.pfNo = pfNo;
 
     // Update user
     await usersCol.updateOne(
@@ -404,7 +522,12 @@ router.put('/:id', async (req, res) => {
         password: '', // Don't send password
         active: updatedUser.isActive !== false,
         portals: updatedUser.portals || [],
-        role: updatedUser.role || 'user'
+        role: updatedUser.role || 'user',
+        employeeId: updatedUser.employeeId || '',
+        department: updatedUser.department || '',
+        company: updatedUser.company || '',
+        hasCredentialAccess: updatedUser.hasCredentialAccess !== false,
+        hasSubscriptionAccess: updatedUser.hasSubscriptionAccess !== false
       }
     });
   } catch (error) {
