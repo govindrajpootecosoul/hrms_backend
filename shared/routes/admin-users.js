@@ -204,6 +204,96 @@ router.get('/', async (req, res) => {
   }
 });
 
+// @route   GET /api/admin-users/departments/list
+// @desc    Get unique list of departments from employees
+// @access  Private/Admin
+// @query   company - Required: company name to determine collection (e.g., 'Ecosoul Home', 'Thrive')
+router.get('/departments/list', async (req, res) => {
+  try {
+    const { company } = req.query;
+    
+    if (!company) {
+      return res.status(400).json({
+        success: false,
+        error: 'Company name is required to fetch departments'
+      });
+    }
+    
+    // Get the appropriate collection based on company
+    const usersCol = await getUsersCollection(null, company);
+    const collectionName = company.toLowerCase().includes('thrive') ? 'Thrive_Employees' : 'Ecosoul_Employees';
+    
+    console.log(`[admin-users/departments] Fetching departments from ${collectionName} collection for company: ${company}`);
+    
+    // Fetch all users and extract unique departments
+    // Check for both isActive and active fields (some records might use different field names)
+    const users = await usersCol.find({ 
+      $or: [
+        { isActive: { $ne: false } },
+        { active: { $ne: false } },
+        { isActive: { $exists: false } }, // If field doesn't exist, include it
+        { active: { $exists: false } } // If field doesn't exist, include it
+      ],
+      department: { $exists: true, $ne: null, $ne: '' } // Only users with department
+    }).toArray();
+    
+    console.log(`[admin-users/departments] Found ${users.length} users with departments`);
+    
+    // Also try a simpler query if the above returns no results
+    if (users.length === 0) {
+      console.log(`[admin-users/departments] No users found with first query, trying simpler query...`);
+      const allUsers = await usersCol.find({ 
+        department: { $exists: true, $ne: null, $ne: '' }
+      }).toArray();
+      console.log(`[admin-users/departments] Found ${allUsers.length} total users with departments (without active filter)`);
+      
+      // Use allUsers if we found any
+      if (allUsers.length > 0) {
+        const departments = [...new Set(
+          allUsers
+            .map(user => user.department?.trim())
+            .filter(dept => dept && dept.length > 0)
+        )].sort();
+        
+        console.log(`[admin-users/departments] Found ${departments.length} unique departments:`, departments);
+        
+        return res.json({
+          success: true,
+          departments: departments,
+          count: departments.length,
+          company: company,
+          collection: collectionName,
+          message: `Fetched ${departments.length} departments from ${collectionName} collection`
+        });
+      }
+    }
+    
+    // Extract unique departments and sort them
+    const departments = [...new Set(
+      users
+        .map(user => user.department?.trim())
+        .filter(dept => dept && dept.length > 0)
+    )].sort();
+    
+    console.log(`[admin-users/departments] Found ${departments.length} unique departments:`, departments);
+    
+    res.json({
+      success: true,
+      departments: departments,
+      count: departments.length,
+      company: company,
+      collection: collectionName,
+      message: `Fetched ${departments.length} departments from ${collectionName} collection`
+    });
+  } catch (error) {
+    console.error('[Admin Users Departments GET Error]', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to fetch departments'
+    });
+  }
+});
+
 // @route   GET /api/admin-users/:id
 // @desc    Get single user by ID
 // @access  Private/Admin
@@ -273,25 +363,22 @@ router.post('/', async (req, res) => {
     } = req.body;
     const { company } = req.query; // Get company from query parameter (for collection selection)
 
-    // Validation
-    if (!name || !email || !password) {
-      return res.status(400).json({
-        success: false,
-        error: 'Name, email, and password are required'
-      });
+    // Validation - All fields are now optional
+    // Only validate format if values are provided
+    
+    // Validate email format (only if email is provided)
+    if (email && email.trim() !== '') {
+      const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+      if (!emailRegex.test(email)) {
+        return res.status(400).json({
+          success: false,
+          error: 'Invalid email format'
+        });
+      }
     }
 
-    // Validate email format
-    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    if (!emailRegex.test(email)) {
-      return res.status(400).json({
-        success: false,
-        error: 'Invalid email format'
-      });
-    }
-
-    // Validate password length
-    if (password.length < 6) {
+    // Validate password length (only if password is provided)
+    if (password && password.trim() !== '' && password.length < 6) {
       return res.status(400).json({
         success: false,
         error: 'Password must be at least 6 characters long'
@@ -301,22 +388,32 @@ router.post('/', async (req, res) => {
     // Get the appropriate collection based on company
     const usersCol = await getUsersCollection(null, company);
 
-    // Check if user already exists
-    const existingUser = await usersCol.findOne({ email: email.toLowerCase() });
-    if (existingUser) {
-      return res.status(400).json({
-        success: false,
-        error: 'User with this email already exists'
-      });
+    // Check if user already exists (only if email is provided)
+    if (email && email.trim() !== '') {
+      const existingUser = await usersCol.findOne({ email: email.toLowerCase().trim() });
+      if (existingUser) {
+        return res.status(400).json({
+          success: false,
+          error: 'User with this email already exists'
+        });
+      }
     }
 
-    // Hash password
-    const hashedPassword = await bcrypt.hash(password, 10);
+    // Hash password (only if provided)
+    let hashedPassword = '';
+    if (password && password.trim() !== '') {
+      hashedPassword = await bcrypt.hash(password, 10);
+    } else {
+      // Generate a random password if not provided
+      const randomPassword = Math.random().toString(36).slice(-12) + Math.random().toString(36).slice(-12);
+      hashedPassword = await bcrypt.hash(randomPassword, 10);
+      console.log('[Admin Users POST] No password provided, generated random password');
+    }
 
-    // Create user object with all fields
+    // Create user object with all fields (handle empty values)
     const newUser = {
-      name: name.trim(),
-      email: email.toLowerCase().trim(),
+      name: (name || '').trim() || 'Employee',
+      email: email ? email.toLowerCase().trim() : '',
       password: hashedPassword,
       isActive: active !== false, // Default to true
       portals: portals || [], // Array of portal names
@@ -357,8 +454,27 @@ router.post('/', async (req, res) => {
       updatedAt: new Date()
     };
 
+    // Log what we're about to insert
+    console.log('[Admin Users POST] Creating user with data:', {
+      name: newUser.name,
+      email: newUser.email,
+      employeeId: newUser.employeeId,
+      company: newUser.company,
+      phone: newUser.phone,
+      jobTitle: newUser.jobTitle,
+      department: newUser.department,
+      location: newUser.location,
+      address: newUser.address,
+      city: newUser.city,
+      state: newUser.state,
+      totalFields: Object.keys(newUser).length
+    });
+    
     // Insert user
     const result = await usersCol.insertOne(newUser);
+    
+    console.log('[Admin Users POST] User inserted successfully. ID:', result.insertedId.toString());
+    console.log('[Admin Users POST] Collection used:', usersCol.collectionName);
 
     res.status(201).json({
       success: true,
@@ -376,7 +492,28 @@ router.post('/', async (req, res) => {
         department: newUser.department,
         company: newUser.company,
         hasCredentialAccess: newUser.hasCredentialAccess,
-        hasSubscriptionAccess: newUser.hasSubscriptionAccess
+        hasSubscriptionAccess: newUser.hasSubscriptionAccess,
+        // Include all other fields in response
+        phone: newUser.phone,
+        dateOfBirth: newUser.dateOfBirth,
+        gender: newUser.gender,
+        address: newUser.address,
+        city: newUser.city,
+        state: newUser.state,
+        zipCode: newUser.zipCode,
+        emergencyContact: newUser.emergencyContact,
+        emergencyPhone: newUser.emergencyPhone,
+        jobTitle: newUser.jobTitle,
+        location: newUser.location,
+        reportingManager: newUser.reportingManager,
+        joiningDate: newUser.joiningDate,
+        bankAccount: newUser.bankAccount,
+        ifsc: newUser.ifsc,
+        pan: newUser.pan,
+        aadhaar: newUser.aadhaar,
+        uan: newUser.uan,
+        esiNo: newUser.esiNo,
+        pfNo: newUser.pfNo,
       }
     });
   } catch (error) {
@@ -540,7 +677,7 @@ router.put('/:id', async (req, res) => {
 });
 
 // @route   DELETE /api/admin-users/:id
-// @desc    Delete a user (soft delete by setting isActive to false)
+// @desc    Delete a user (hard delete - remove from database)
 // @access  Private/Admin
 // @query   company - Optional: company name to determine collection (e.g., 'Ecosoul Home', 'Thrive')
 router.delete('/:id', async (req, res) => {
@@ -567,16 +704,8 @@ router.delete('/:id', async (req, res) => {
       });
     }
 
-    // Soft delete - set isActive to false
-    await usersCol.updateOne(
-      { _id: new ObjectId(id) },
-      { 
-        $set: { 
-          isActive: false,
-          updatedAt: new Date()
-        } 
-      }
-    );
+    // Hard delete - remove from database
+    await usersCol.deleteOne({ _id: new ObjectId(id) });
 
     res.json({
       success: true,

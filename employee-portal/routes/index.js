@@ -249,13 +249,33 @@ router.post('/checkin', async (req, res) => {
       });
     }
 
+    // Calculate total minutes from all previous check-ins today
+    // This allows multiple check-ins on the same day to accumulate time
+    const todayCheckIns = await col.find({ 
+      employeeId, 
+      date: today 
+    }).toArray();
+    
+    // Calculate accumulated minutes from all completed check-in sessions today
+    // Each completed session's totalMinutes already includes all previous sessions
+    // So we need to find the maximum totalMinutes from completed sessions
+    let accumulatedMinutes = 0;
+    todayCheckIns.forEach(record => {
+      if (record.checkOutTime && record.totalMinutes) {
+        // For completed sessions, use the maximum (which is the latest total)
+        if (record.totalMinutes > accumulatedMinutes) {
+          accumulatedMinutes = record.totalMinutes;
+        }
+      }
+    });
+
     const checkInTime = new Date();
     const checkInDoc = {
       employeeId,
       date: today,
       checkInTime: checkInTime.toISOString(),
       checkOutTime: null,
-      totalMinutes: 0,
+      totalMinutes: accumulatedMinutes, // Start with accumulated time from previous sessions
       status: 'checked-in',
       createdAt: checkInTime,
       updatedAt: checkInTime
@@ -270,6 +290,7 @@ router.post('/checkin', async (req, res) => {
       data: {
         checkInTime: checkInDoc.checkInTime,
         status: 'checked-in',
+        totalMinutes: accumulatedMinutes, // Include accumulated minutes so frontend can resume timer
         employeeId: employeeId
       }
     });
@@ -314,7 +335,11 @@ router.post('/checkout', async (req, res) => {
 
     const checkOutTime = new Date();
     const checkInTime = new Date(checkIn.checkInTime);
-    const totalMinutes = Math.max(0, (checkOutTime.getTime() - checkInTime.getTime()) / 60000);
+    const sessionMinutes = Math.max(0, (checkOutTime.getTime() - checkInTime.getTime()) / 60000);
+    
+    // Add session minutes to the accumulated total from previous check-ins today
+    // checkIn.totalMinutes already contains accumulated time from previous sessions (set during check-in)
+    const totalMinutes = (checkIn.totalMinutes || 0) + sessionMinutes;
 
     await col.updateOne(
       { _id: checkIn._id },
@@ -363,16 +388,15 @@ router.get('/checkin/status', async (req, res) => {
     const col = db.collection('employee_checkins');
     const today = new Date().toISOString().split('T')[0];
     
-    // Find today's check-in record (most recent if multiple)
-    const todayCheckIn = await col.findOne(
+    // Find all today's check-in records to calculate total accumulated time
+    const todayCheckIns = await col.find(
       { 
         employeeId, 
         date: today 
-      },
-      { sort: { checkInTime: -1 } } // Get most recent if multiple
-    );
+      }
+    ).sort({ checkInTime: -1 }).toArray(); // Sort by most recent first
 
-    if (!todayCheckIn) {
+    if (!todayCheckIns || todayCheckIns.length === 0) {
       return res.json({ 
         success: true, 
         data: {
@@ -385,23 +409,49 @@ router.get('/checkin/status', async (req, res) => {
       });
     }
 
-    let totalMinutes = todayCheckIn.totalMinutes || 0;
-    let status = todayCheckIn.status || 'checked-out';
+    // Get the most recent check-in (active or last completed)
+    const mostRecentCheckIn = todayCheckIns[0];
+    
+    // Calculate total accumulated minutes from all completed sessions today
+    // Each completed session's totalMinutes already includes all previous sessions
+    // So we just need the maximum totalMinutes from completed sessions
+    let maxCompletedMinutes = 0;
+    todayCheckIns.forEach(record => {
+      if (record.checkOutTime && record.totalMinutes) {
+        // For completed sessions, find the maximum (which is the latest total)
+        if (record.totalMinutes > maxCompletedMinutes) {
+          maxCompletedMinutes = record.totalMinutes;
+        }
+      }
+    });
 
-    // If checked in but not checked out, calculate current minutes in real-time
-    if (todayCheckIn.checkInTime && !todayCheckIn.checkOutTime) {
-      const checkInTime = new Date(todayCheckIn.checkInTime);
+    let totalMinutes = maxCompletedMinutes;
+    let status = mostRecentCheckIn.status || 'checked-out';
+    let currentCheckInTime = null;
+
+    // If checked in but not checked out, calculate current session minutes and add to accumulated
+    if (mostRecentCheckIn.checkInTime && !mostRecentCheckIn.checkOutTime) {
+      const checkInTime = new Date(mostRecentCheckIn.checkInTime);
       const now = new Date();
-      totalMinutes = Math.max(0, (now.getTime() - checkInTime.getTime()) / 60000);
+      const currentSessionMinutes = Math.max(0, (now.getTime() - checkInTime.getTime()) / 60000);
+      
+      // Total = accumulated from previous sessions (stored in totalMinutes) + current session minutes
+      const baseMinutes = mostRecentCheckIn.totalMinutes || 0;
+      totalMinutes = baseMinutes + currentSessionMinutes;
       status = 'checked-in';
+      currentCheckInTime = mostRecentCheckIn.checkInTime;
+    } else {
+      // If checked out, use the total from the most recent record (which includes all sessions)
+      totalMinutes = mostRecentCheckIn.totalMinutes || 0;
+      currentCheckInTime = mostRecentCheckIn.checkInTime;
     }
 
     res.json({ 
       success: true, 
       data: {
         status,
-        checkInTime: todayCheckIn.checkInTime,
-        checkOutTime: todayCheckIn.checkOutTime,
+        checkInTime: currentCheckInTime || mostRecentCheckIn.checkInTime || null,
+        checkOutTime: mostRecentCheckIn.checkOutTime || null,
         totalMinutes: totalMinutes,
         employeeId: employeeId
       }
