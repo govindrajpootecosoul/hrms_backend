@@ -15,7 +15,7 @@ const USERS_COLLECTION = config.mongodb.usersCollection;
 const PORTAL_CONFIG = {
   'hrms-portal': {
     database: getDatabaseName('hrms'),
-    collections: ['employees', 'attendance', 'leaves', 'departments', 'designations', 'recruitment']
+    collections: ['employees', 'attendance', 'leaves', 'departments', 'designations', 'recruitment', 'leave_policies']
   },
   'asset-tracker-portal': {
     database: getDatabaseName('assetTracker'),
@@ -27,7 +27,7 @@ const PORTAL_CONFIG = {
   },
   'employee-portal': {
     database: getDatabaseName('employee'),
-    collections: ['dashboard', 'requests', 'announcements', 'documents', 'payroll']
+    collections: ['dashboard', 'requests', 'announcements', 'documents', 'payroll', 'attendance_requests', 'employee_checkins']
   },
   'query-tracker-portal': {
     database: getDatabaseName('queryTracker'),

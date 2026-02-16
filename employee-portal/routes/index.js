@@ -504,4 +504,129 @@ router.get('/checkin/history', async (req, res) => {
   }
 });
 
+// Submit attendance request (regularization, on-duty, time-off)
+router.post('/attendance-request', async (req, res) => {
+  try {
+    await connectMongo();
+    const { employeeId, type, date, timeWindow, notes, location, details, dateRange, reason } = req.body;
+    const company = getCompanyFromRequest(req);
+    
+    if (!employeeId || !type) {
+      return res.status(400).json({ success: false, error: 'Employee ID and request type are required' });
+    }
+
+    // Validate request type
+    const validTypes = ['regularization', 'on-duty', 'time-off'];
+    if (!validTypes.includes(type)) {
+      return res.status(400).json({ success: false, error: 'Invalid request type. Must be: regularization, on-duty, or time-off' });
+    }
+
+    // Validate required fields based on type
+    if (type === 'regularization' && (!date || !timeWindow)) {
+      return res.status(400).json({ success: false, error: 'Date and time window are required for regularization' });
+    }
+    if (type === 'on-duty' && (!date || !location)) {
+      return res.status(400).json({ success: false, error: 'Date and location are required for on-duty request' });
+    }
+    if (type === 'time-off' && (!dateRange || !reason)) {
+      return res.status(400).json({ success: false, error: 'Date range and reason are required for time-off request' });
+    }
+
+    console.log(`[attendance-request] Employee ${employeeId} submitting ${type} request${company ? ` (Company: ${company})` : ''}`);
+
+    // Get company-specific database
+    const db = company ? await getEmployeePortalDb(company) : await getDb();
+    const col = db.collection('attendance_requests');
+
+    // Create request document
+    const requestDoc = {
+      employeeId,
+      type,
+      status: 'pending',
+      submittedAt: new Date(),
+      company: company || null,
+      ...(type === 'regularization' && {
+        date,
+        timeWindow,
+        notes: notes || ''
+      }),
+      ...(type === 'on-duty' && {
+        date,
+        location,
+        details: details || ''
+      }),
+      ...(type === 'time-off' && {
+        dateRange,
+        reason: reason || ''
+      }),
+      createdAt: new Date(),
+      updatedAt: new Date()
+    };
+
+    const result = await col.insertOne(requestDoc);
+    console.log(`[attendance-request] Request created with ID: ${result.insertedId}`);
+
+    res.json({
+      success: true,
+      message: 'Attendance request submitted successfully',
+      data: {
+        requestId: result.insertedId,
+        type,
+        status: 'pending'
+      }
+    });
+  } catch (err) {
+    console.error('[attendance-request] Error:', err);
+    res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+});
+
+// Get employee's attendance requests
+router.get('/attendance-requests', async (req, res) => {
+  try {
+    await connectMongo();
+    const employeeId = req.query.employeeId;
+    const company = getCompanyFromRequest(req);
+    
+    if (!employeeId) {
+      return res.status(400).json({ success: false, error: 'Employee ID is required' });
+    }
+
+    // Get company-specific database
+    const db = company ? await getEmployeePortalDb(company) : await getDb();
+    const col = db.collection('attendance_requests');
+
+    const requests = await col
+      .find({ employeeId })
+      .sort({ submittedAt: -1 })
+      .toArray();
+
+    res.json({
+      success: true,
+      data: {
+        requests: requests.map(req => ({
+          id: req._id,
+          type: req.type,
+          status: req.status,
+          submittedAt: req.submittedAt,
+          date: req.date,
+          timeWindow: req.timeWindow,
+          notes: req.notes,
+          location: req.location,
+          details: req.details,
+          dateRange: req.dateRange,
+          reason: req.reason,
+          approvedAt: req.approvedAt,
+          rejectedAt: req.rejectedAt,
+          approvedBy: req.approvedBy,
+          rejectionReason: req.rejectionReason
+        }))
+      }
+    });
+  } catch (err) {
+    console.error('[attendance-requests] Error:', err);
+    res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+});
+
 module.exports = router;

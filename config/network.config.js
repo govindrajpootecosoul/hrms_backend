@@ -3,21 +3,27 @@ require('dotenv').config();
 /**
  * Network Configuration for Backend
  * 
- * ⚠️ IMPORTANT: Update only this file to change network settings
- * This is the SINGLE SOURCE OF TRUTH for backend network configuration
+ * ⚠️ IMPORTANT: Update .env file to change network settings
+ * This file reads from environment variables only
  * 
  * To change network settings:
- * 1. Update SERVER_IP and BACKEND_PORT below
- * 2. Or set environment variables: SERVER_IP and BACKEND_PORT
+ * Update SERVER_IP and BACKEND_PORT in .env file
  */
 
+// Validate required environment variables
+if (!process.env.SERVER_IP) {
+  throw new Error('SERVER_IP must be set in .env file');
+}
+if (!process.env.BACKEND_PORT) {
+  throw new Error('BACKEND_PORT must be set in .env file');
+}
+
 const networkConfig = {
-  // Server IP Address (change this to your network IP)
-  // Examples: '192.168.50.107', '192.168.1.100', 'localhost'
-  serverIp: process.env.SERVER_IP || '192.168.50.107',
+  // Server IP Address (must be set in .env file)
+  serverIp: process.env.SERVER_IP,
   
-  // Backend Port (change this to your desired port)
-  backendPort: parseInt(process.env.BACKEND_PORT) || 5008,
+  // Backend Port (must be set in .env file)
+  backendPort: parseInt(process.env.BACKEND_PORT),
 };
 
 // Helper function to get backend URL
