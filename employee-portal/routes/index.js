@@ -508,7 +508,7 @@ router.get('/checkin/history', async (req, res) => {
 router.post('/attendance-request', async (req, res) => {
   try {
     await connectMongo();
-    const { employeeId, type, date, timeWindow, notes, location, details, dateRange, reason } = req.body;
+    const { employeeId, type, date, timeWindow, notes, location, details, dateRange, reason, leaveType } = req.body;
     const company = getCompanyFromRequest(req);
     
     if (!employeeId || !type) {
@@ -532,7 +532,7 @@ router.post('/attendance-request', async (req, res) => {
       return res.status(400).json({ success: false, error: 'Date range and reason are required for time-off request' });
     }
 
-    console.log(`[attendance-request] Employee ${employeeId} submitting ${type} request${company ? ` (Company: ${company})` : ''}`);
+    console.log(`[attendance-request] Employee ${employeeId} submitting ${type} request${company ? ` (Company: ${company})` : ''}${leaveType ? ` (Leave Type: ${leaveType})` : ''}`);
 
     // Get company-specific database
     const db = company ? await getEmployeePortalDb(company) : await getDb();
@@ -557,7 +557,8 @@ router.post('/attendance-request', async (req, res) => {
       }),
       ...(type === 'time-off' && {
         dateRange,
-        reason: reason || ''
+        reason: reason || '',
+        leaveType: leaveType || 'Time Off' // Store leave type for time-off requests
       }),
       createdAt: new Date(),
       updatedAt: new Date()
@@ -608,6 +609,7 @@ router.get('/attendance-requests', async (req, res) => {
           id: req._id,
           type: req.type,
           status: req.status,
+          leaveType: req.leaveType, // Include leaveType for Employee Portal
           submittedAt: req.submittedAt,
           date: req.date,
           timeWindow: req.timeWindow,
@@ -619,7 +621,8 @@ router.get('/attendance-requests', async (req, res) => {
           approvedAt: req.approvedAt,
           rejectedAt: req.rejectedAt,
           approvedBy: req.approvedBy,
-          rejectionReason: req.rejectionReason
+          rejectionReason: req.rejectionReason,
+          updatedAt: req.updatedAt // Include updatedAt to track changes
         }))
       }
     });

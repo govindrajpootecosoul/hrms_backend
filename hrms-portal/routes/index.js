@@ -11,11 +11,13 @@ function getCompanyFromRequest(req) {
 }
 
 /**
- * Get HRMS database (company-specific)
+ * Get HRMS database (company-specific or all data for admin)
+ * For HRMS Admin Portal, if company is null or 'all', return default database with all data
  */
 async function getHrmsDb(company = null) {
   await connectMongo();
-  if (!company) {
+  // For HRMS Admin Portal - show all data if company is null or 'all'
+  if (!company || company === 'all' || company === 'undefined') {
     const { getDatabaseName } = require('../../config/database.config');
     return (await getDb(getDatabaseName('hrms')));
   }
@@ -26,6 +28,49 @@ async function getHrmsDb(company = null) {
   const client = new MongoClient(uri);
   await client.connect();
   return client.db(dbName);
+}
+
+/**
+ * Get all HRMS databases for aggregating data across companies
+ * Optimized for fast loading - uses parallel queries
+ */
+async function getAllHrmsDbs() {
+  await connectMongo();
+  const { getDatabaseName } = require('../../config/database.config');
+  
+  // Get default HRMS database
+  const defaultDb = await getDb(getDatabaseName('hrms'));
+  
+  // Try to get company-specific databases in parallel for faster loading
+  const companyNames = ['Ecosoul Home', 'Thrive'];
+  const dbPromises = companyNames.map(async (companyName) => {
+    try {
+      const dbName = getCompanyDatabaseName('hrms', companyName);
+      const { MongoClient } = require('mongodb');
+      const { getMongoUri } = require('../../config/app.config');
+      const uri = getMongoUri();
+      const client = new MongoClient(uri);
+      await client.connect();
+      const db = client.db(dbName);
+      
+      // Quick check if database has data
+      const recruitmentCol = db.collection('recruitment');
+      const count = await recruitmentCol.countDocuments({}, { limit: 1 });
+      if (count > 0) {
+        return db;
+      }
+      await client.close();
+      return null;
+    } catch (err) {
+      // Database doesn't exist or error, skip
+      return null;
+    }
+  });
+  
+  const companyDbs = await Promise.all(dbPromises);
+  const dbs = [defaultDb, ...companyDbs.filter(db => db !== null)];
+  
+  return dbs;
 }
 
 /**
@@ -139,29 +184,101 @@ router.get('/employees', async (req, res) => {
 router.get('/attendance', async (req, res) => {
   try {
     await connectMongo();
-    const company = getCompanyFromRequest(req);
+    // Normalize company early (same as stats endpoint)
+    const requestedCompany = getCompanyFromRequest(req);
+    let companyName = requestedCompany;
+    if (!companyName || companyName === '1' || companyName === 'undefined') {
+      companyName = 'Ecosoul Home';
+    }
+    // Normalize common aliases
+    if (companyName.toLowerCase() === 'ecosoul' || companyName.toLowerCase() === 'ecosoul home') {
+      companyName = 'Ecosoul Home';
+    }
+    
     const date = req.query.date || new Date().toISOString().split('T')[0]; // Default to today
     const department = req.query.department || 'all';
     
-    // Get employee database where check-ins are stored
-    const db = await getEmployeeDbForHrms(company);
-    const col = db.collection('employee_checkins');
+    // Get employee database where check-ins are stored (use normalized company)
+    const db = await getEmployeeDbForHrms(companyName);
+    let col = db.collection('employee_checkins');
 
     // Get employees collection for employee details
     const { getUsersCollection } = require('../../config/mongo');
-    const usersCol = await getUsersCollection(null, company || 'Ecosoul Home');
+    const usersCol = await getUsersCollection(null, companyName);
 
-    // Build query
-    const query = { date };
+    // Build query - try date field first
+    let query = { date };
     if (department !== 'all') {
       // Note: Department filtering would require employee data join
       // For now, we'll return all and filter on frontend if needed
     }
 
-    const checkIns = await col
+    let checkIns = await col
       .find(query)
       .sort({ checkInTime: -1 })
       .toArray();
+    
+    console.log(`[attendance] Found ${checkIns.length} check-ins for date: ${date} (company DB: ${companyName})`);
+    
+    // If no results, try querying by checkInTime date range
+    if (checkIns.length === 0) {
+      try {
+        const todayDate = new Date(date);
+        const startOfDay = new Date(todayDate);
+        startOfDay.setHours(0, 0, 0, 0);
+        const endOfDay = new Date(todayDate);
+        endOfDay.setHours(23, 59, 59, 999);
+        
+        console.log(`[attendance] Trying alternative query by checkInTime range: ${startOfDay.toISOString()} to ${endOfDay.toISOString()}`);
+        const alternativeQuery = {
+          checkInTime: {
+            $gte: startOfDay,
+            $lte: endOfDay
+          }
+        };
+        checkIns = await col.find(alternativeQuery).sort({ checkInTime: -1 }).toArray();
+        console.log(`[attendance] Found ${checkIns.length} check-ins using checkInTime range query (company DB)`);
+      } catch (e) {
+        console.error('[attendance] Alternative query by checkInTime failed:', e);
+      }
+    }
+    
+    // Fallback: if company DB has no check-ins, try the default employee DB
+    if (checkIns.length === 0 && requestedCompany) {
+      try {
+        const defaultEmployeeDb = await getEmployeeDbForHrms(null);
+        const defaultCol = defaultEmployeeDb.collection('employee_checkins');
+        
+        // Try date field first
+        let fallbackCheckIns = await defaultCol.find({ date }).sort({ checkInTime: -1 }).toArray();
+        
+        // If no results, try checkInTime range
+        if (fallbackCheckIns.length === 0) {
+          const todayDate = new Date(date);
+          const startOfDay = new Date(todayDate);
+          startOfDay.setHours(0, 0, 0, 0);
+          const endOfDay = new Date(todayDate);
+          endOfDay.setHours(23, 59, 59, 999);
+          
+          fallbackCheckIns = await defaultCol.find({
+            checkInTime: {
+              $gte: startOfDay,
+              $lte: endOfDay
+            }
+          }).sort({ checkInTime: -1 }).toArray();
+        }
+        
+        if (fallbackCheckIns.length > 0) {
+          console.log(`[attendance] Fallback: Found ${fallbackCheckIns.length} check-ins in default employee DB for date: ${date}`);
+          checkIns = fallbackCheckIns;
+          col = defaultCol;
+        } else {
+          console.log(`[attendance] Fallback: No check-ins found in default employee DB for date: ${date}`);
+        }
+      } catch (e) {
+        console.error('[attendance] Fallback to default employee DB failed:', e);
+      }
+    }
 
     // Get all employees to map employeeId to employee details
     const allEmployees = await usersCol.find({}).toArray();
@@ -250,36 +367,56 @@ router.get('/attendance', async (req, res) => {
 router.get('/attendance/stats', async (req, res) => {
   try {
     await connectMongo();
-    const company = getCompanyFromRequest(req);
+    // Normalize company early and use consistently across DB selection + queries.
+    // We've seen requests coming in with company = '1' / 'undefined', which previously caused
+    // us to select the wrong DB (leading to presentCount=0) even though employee lookup defaulted
+    // to 'Ecosoul Home' later.
+    const requestedCompany = getCompanyFromRequest(req);
+    const normalizedCompanyRaw =
+      !requestedCompany || requestedCompany === '1' || requestedCompany === 'undefined'
+        ? null
+        : requestedCompany;
+
+    // Handle common aliases / inconsistent casing from different parts of the app
+    // (e.g. "EcoSoul" coming from UI/session storage)
+    const normalizedCompany = (() => {
+      if (!normalizedCompanyRaw) return null;
+      const c = String(normalizedCompanyRaw).trim();
+      const lc = c.toLowerCase();
+      if (lc === 'ecosoul' || lc === 'ecosoulhome' || lc === 'eco soul') return 'Ecosoul Home';
+      if (lc === 'ecosoul home') return 'Ecosoul Home';
+      return c;
+    })();
     const date = req.query.date || new Date().toISOString().split('T')[0];
     
-    // Get employee database
-    const db = await getEmployeeDbForHrms(company);
-    const col = db.collection('employee_checkins');
+    // Get employee database (company-specific if company is provided)
+    // NOTE: In some deployments, check-ins may still be stored in the default employee DB.
+    // We'll query company DB first, then fall back to default DB if no records are found.
+    const effectiveCompany = normalizedCompany || 'Ecosoul Home';
+    const db = await getEmployeeDbForHrms(effectiveCompany);
+    let col = db.collection('employee_checkins');
 
     // Get employees collection for total count
     const { getUsersCollection } = require('../../config/mongo');
     // Try to get company name, default to 'Ecosoul Home' if not provided
-    let companyName = company;
-    if (!companyName || companyName === '1' || companyName === 'undefined') {
-      // Try to infer from request headers or use default
-      companyName = 'Ecosoul Home';
-    }
+    let companyName = effectiveCompany;
     
     // Try both collections if company name is ambiguous
     let totalEmployees = 0;
+    let employeesList = [];
     try {
       const usersCol = await getUsersCollection(null, companyName);
-      totalEmployees = await usersCol.countDocuments({});
+      employeesList = await usersCol.find({}).toArray();
+      totalEmployees = employeesList.length;
       console.log(`[attendance/stats] Total employees: ${totalEmployees} for company: ${companyName}`);
       
       // If count is 0, try the other company collection
       if (totalEmployees === 0 && (companyName === 'Ecosoul Home' || !company)) {
         const otherCompany = companyName === 'Ecosoul Home' ? 'Thrive' : 'Ecosoul Home';
         const otherUsersCol = await getUsersCollection(null, otherCompany);
-        const otherCount = await otherUsersCol.countDocuments({});
-        if (otherCount > 0) {
-          totalEmployees = otherCount;
+        employeesList = await otherUsersCol.find({}).toArray();
+        totalEmployees = employeesList.length;
+        if (totalEmployees > 0) {
           companyName = otherCompany;
           console.log(`[attendance/stats] Found ${totalEmployees} employees in ${otherCompany} collection`);
         }
@@ -289,21 +426,347 @@ router.get('/attendance/stats', async (req, res) => {
       // Try default collection
       try {
         const defaultUsersCol = await getUsersCollection(null, 'Ecosoul Home');
-        totalEmployees = await defaultUsersCol.countDocuments({});
+        employeesList = await defaultUsersCol.find({}).toArray();
+        totalEmployees = employeesList.length;
         console.log(`[attendance/stats] Using default collection, found ${totalEmployees} employees`);
       } catch (defaultErr) {
         console.error('[attendance/stats] Error with default collection:', defaultErr);
       }
     }
 
-    // Get today's check-ins
-    const todayCheckIns = await col.find({ date }).toArray();
+    // Debug: Check total records in collection and sample records
+    const totalCheckIns = await col.countDocuments({});
+    const sampleCheckIns = await col.find({}).limit(5).toArray();
+    console.log(`[attendance/stats] Total check-ins in collection: ${totalCheckIns}`);
+    if (sampleCheckIns.length > 0) {
+      console.log(`[attendance/stats] Sample check-in record:`, JSON.stringify(sampleCheckIns[0], null, 2));
+    }
+    
+    // Build employeeId mapping - map all possible employeeId formats to a canonical form
+    const employeeIdMap = new Map(); // Maps any employeeId format to canonical employeeId
+    employeesList.forEach(emp => {
+      const canonicalId = emp.employeeId || emp.email?.split('@')[0] || '';
+      if (canonicalId) {
+        // Map the canonical ID to itself
+        employeeIdMap.set(canonicalId, canonicalId);
+        // Also map email prefix if different
+        if (emp.email) {
+          const emailPrefix = emp.email.split('@')[0];
+          if (emailPrefix !== canonicalId) {
+            employeeIdMap.set(emailPrefix, canonicalId);
+          }
+        }
+        // Map employeeId if it exists and is different
+        if (emp.employeeId && emp.employeeId !== canonicalId) {
+          employeeIdMap.set(emp.employeeId, canonicalId);
+        }
+        // Also map full email if it's used as employeeId
+        if (emp.email) {
+          employeeIdMap.set(emp.email, canonicalId);
+        }
+      }
+    });
+    
+    console.log(`[attendance/stats] Built employeeId map with ${employeeIdMap.size} entries`);
+    
+    // Get today's check-ins - filter by date
+    // Date format should be YYYY-MM-DD (e.g., "2025-02-16")
+    // First, let's check what check-ins exist in the database (recent ones for debugging)
+    const recentCheckIns = await col.find({}).sort({ checkInTime: -1 }).limit(5).toArray();
+    if (recentCheckIns.length > 0) {
+      console.log(`[attendance/stats] Sample recent check-ins structure:`, JSON.stringify(recentCheckIns.map(c => ({
+        date: c.date,
+        checkInTime: c.checkInTime,
+        employeeId: c.employeeId,
+        dateType: typeof c.date
+      })), null, 2));
+    } else {
+      console.log(`[attendance/stats] No check-ins found in company DB collection at all`);
+    }
+    
+    // Try querying by date field first
+    let checkInQuery = { date };
+    console.log(`[attendance/stats] Querying check-ins with date: ${date}, company: ${companyName}`);
+    
+    let todayCheckIns = await col.find(checkInQuery).toArray();
+    console.log(`[attendance/stats] Found ${todayCheckIns.length} check-in records for date: ${date} (company DB)`);
+    
+    // If no results, try querying by checkInTime date range
+    if (todayCheckIns.length === 0) {
+      try {
+        const todayDate = new Date(date);
+        const startOfDay = new Date(todayDate);
+        startOfDay.setHours(0, 0, 0, 0);
+        const endOfDay = new Date(todayDate);
+        endOfDay.setHours(23, 59, 59, 999);
+        
+        console.log(`[attendance/stats] Trying alternative query by checkInTime range: ${startOfDay.toISOString()} to ${endOfDay.toISOString()}`);
+        const alternativeQuery = {
+          checkInTime: {
+            $gte: startOfDay,
+            $lte: endOfDay
+          }
+        };
+        todayCheckIns = await col.find(alternativeQuery).toArray();
+        console.log(`[attendance/stats] Found ${todayCheckIns.length} check-in records using checkInTime range query (company DB)`);
+      } catch (e) {
+        console.error('[attendance/stats] Alternative query by checkInTime failed:', e);
+      }
+    }
+    
+    // Fallback: if company DB has no check-ins, try the default employee DB
+    // (some deployments still store check-ins in the base employee DB)
+    if (todayCheckIns.length === 0) {
+      try {
+        const defaultEmployeeDb = await getEmployeeDbForHrms(null);
+        const defaultCol = defaultEmployeeDb.collection('employee_checkins');
+        
+        // Try date field first
+        let fallbackCheckIns = await defaultCol.find({ date }).toArray();
+        
+        // If no results, try checkInTime range
+        if (fallbackCheckIns.length === 0) {
+          const todayDate = new Date(date);
+          const startOfDay = new Date(todayDate);
+          startOfDay.setHours(0, 0, 0, 0);
+          const endOfDay = new Date(todayDate);
+          endOfDay.setHours(23, 59, 59, 999);
+          
+          fallbackCheckIns = await defaultCol.find({
+            checkInTime: {
+              $gte: startOfDay,
+              $lte: endOfDay
+            }
+          }).toArray();
+        }
+        
+        if (fallbackCheckIns.length > 0) {
+          console.log(`[attendance/stats] Fallback: Found ${fallbackCheckIns.length} check-in records in default employee DB for date: ${date}`);
+          todayCheckIns = fallbackCheckIns;
+          col = defaultCol;
+        } else {
+          console.log(`[attendance/stats] Fallback: No check-ins found in default employee DB for date: ${date}`);
+        }
+      } catch (e) {
+        console.error('[attendance/stats] Fallback to default employee DB failed:', e);
+      }
+    }
+    
+    if (todayCheckIns.length > 0) {
+      console.log(`[attendance/stats] Sample today's check-in:`, JSON.stringify(todayCheckIns[0], null, 2));
+    } else {
+      console.log(`[attendance/stats] WARNING: No check-ins found for date ${date} in any database`);
+    }
 
-    // Calculate stats
-    const presentCount = todayCheckIns.filter(c => c.checkInTime && (c.checkOutTime || !c.checkOutTime)).length;
-    const absentCount = 0; // Would need total employee count to calculate
-    const onLeaveCount = 0; // Would need leave data
-    const onWFHCount = 0; // Would need WFH data
+    // Get approved leave requests for today
+    const requestsCol = db.collection('attendance_requests');
+    const todayDateStr = date; // Format: YYYY-MM-DD
+    
+    // Get approved time-off requests that overlap with today
+    const approvedLeaveQuery = {
+      type: 'time-off',
+      status: 'approved',
+      ...(companyName ? { company: companyName } : {})
+    };
+    const approvedLeaves = await requestsCol.find(approvedLeaveQuery).toArray();
+    
+    const onLeaveEmployees = new Set();
+    approvedLeaves.forEach(leave => {
+      if (leave.dateRange) {
+        const parts = leave.dateRange.split(' - ');
+        if (parts.length === 2) {
+          try {
+            // Parse dates - handle both "YYYY-MM-DD" and "DD MMM YYYY" formats
+            let fromDateStr = parts[0].trim();
+            let toDateStr = parts[1].trim();
+            
+            // Convert to Date objects and normalize to YYYY-MM-DD format
+            const fromDate = new Date(fromDateStr);
+            const toDate = new Date(toDateStr);
+            const todayDate = new Date(todayDateStr);
+            
+            // Normalize all dates to start of day for comparison
+            fromDate.setHours(0, 0, 0, 0);
+            toDate.setHours(0, 0, 0, 0);
+            todayDate.setHours(0, 0, 0, 0);
+            
+            // Check if today falls within the leave date range
+            if (todayDate >= fromDate && todayDate <= toDate) {
+              // Normalize employeeId for leave
+              const leaveEmpId = leave.employeeId;
+              let normalizedLeaveId = employeeIdMap.get(leaveEmpId);
+              if (!normalizedLeaveId) {
+                const matchingEmp = employeesList.find(emp => {
+                  const empId = emp.employeeId || emp.email?.split('@')[0] || '';
+                  const emailPrefix = emp.email?.split('@')[0] || '';
+                  return empId === leaveEmpId || 
+                         emailPrefix === leaveEmpId ||
+                         emp.email === leaveEmpId ||
+                         emp.employeeId === leaveEmpId;
+                });
+                if (matchingEmp) {
+                  normalizedLeaveId = matchingEmp.employeeId || matchingEmp.email?.split('@')[0] || leaveEmpId;
+                  employeeIdMap.set(leaveEmpId, normalizedLeaveId);
+                } else {
+                  normalizedLeaveId = leaveEmpId;
+                }
+              }
+              onLeaveEmployees.add(normalizedLeaveId);
+            }
+          } catch (e) {
+            console.error('[attendance/stats] Error parsing leave date range:', leave.dateRange, e);
+          }
+        }
+      }
+    });
+    const onLeaveCount = onLeaveEmployees.size;
+
+    // Count WFH - employees who checked in but marked as WFH or have WFH status
+    // Also check for WFH requests in attendance_requests
+    const wfhEmployees = new Set();
+    
+    // First, check check-ins for WFH status
+    todayCheckIns.forEach(c => {
+      if (c.checkInTime && c.employeeId) {
+        // Check if marked as WFH in check-in record
+        const isWFH = c.status === 'wfh' || 
+                      c.status === 'WFH' ||
+                      c.location === 'remote' || 
+                      c.location === 'WFH' ||
+                      c.location === 'wfh' ||
+                      c.workMode === 'WFH' ||
+                      c.workMode === 'wfh';
+        
+        if (isWFH) {
+          // Try to normalize the employeeId using our map
+          let normalizedId = employeeIdMap.get(c.employeeId);
+          
+          // If not found in map, try to find by matching with employee list
+          if (!normalizedId) {
+            const matchingEmp = employeesList.find(emp => {
+              const empId = emp.employeeId || emp.email?.split('@')[0] || '';
+              const emailPrefix = emp.email?.split('@')[0] || '';
+              return empId === c.employeeId || 
+                     emailPrefix === c.employeeId ||
+                     emp.email === c.employeeId ||
+                     emp.employeeId === c.employeeId;
+            });
+            
+            if (matchingEmp) {
+              normalizedId = matchingEmp.employeeId || matchingEmp.email?.split('@')[0] || c.employeeId;
+              employeeIdMap.set(c.employeeId, normalizedId);
+            } else {
+              normalizedId = c.employeeId;
+            }
+          }
+          
+          wfhEmployees.add(normalizedId);
+          console.log(`[attendance/stats] Found WFH check-in for employee: ${c.employeeId} (normalized: ${normalizedId})`);
+        }
+      }
+    });
+    
+    // Also check for approved WFH requests
+    const wfhRequestsQuery = {
+      type: { $in: ['wfh', 'WFH', 'work-from-home', 'work from home'] },
+      status: 'approved',
+      ...(companyName ? { company: companyName } : {})
+    };
+    const wfhRequests = await requestsCol.find(wfhRequestsQuery).toArray();
+    wfhRequests.forEach(req => {
+      if (req.dateRange) {
+        const parts = req.dateRange.split(' - ');
+        if (parts.length === 2) {
+          try {
+            const fromDate = new Date(parts[0].trim());
+            const toDate = new Date(parts[1].trim());
+            const todayDate = new Date(todayDateStr);
+            
+            fromDate.setHours(0, 0, 0, 0);
+            toDate.setHours(0, 0, 0, 0);
+            todayDate.setHours(0, 0, 0, 0);
+            
+            if (todayDate >= fromDate && todayDate <= toDate) {
+              const reqEmpId = req.employeeId;
+              let normalizedId = employeeIdMap.get(reqEmpId);
+              if (!normalizedId) {
+                const matchingEmp = employeesList.find(emp => {
+                  const empId = emp.employeeId || emp.email?.split('@')[0] || '';
+                  return empId === reqEmpId || emp.email === reqEmpId || emp.employeeId === reqEmpId;
+                });
+                if (matchingEmp) {
+                  normalizedId = matchingEmp.employeeId || matchingEmp.email?.split('@')[0] || reqEmpId;
+                  employeeIdMap.set(reqEmpId, normalizedId);
+                } else {
+                  normalizedId = reqEmpId;
+                }
+              }
+              wfhEmployees.add(normalizedId);
+              console.log(`[attendance/stats] Found WFH request for employee: ${reqEmpId} (normalized: ${normalizedId})`);
+            }
+          } catch (e) {
+            console.error('[attendance/stats] Error parsing WFH request date range:', req.dateRange, e);
+          }
+        }
+      }
+    });
+    
+    const onWFHCount = wfhEmployees.size;
+    console.log(`[attendance/stats] WFH employees: ${onWFHCount}`, Array.from(wfhEmployees));
+
+    // Get unique employees who checked in today (have checkInTime) - EXCLUDING WFH
+    // Present = employees who checked in AND are NOT WFH
+    const presentEmployees = new Set();
+    todayCheckIns.forEach(c => {
+      if (c.checkInTime && c.employeeId) {
+        // Skip if this employee is WFH
+        const isWFH = c.status === 'wfh' || 
+                      c.status === 'WFH' ||
+                      c.location === 'remote' || 
+                      c.location === 'WFH' ||
+                      c.location === 'wfh' ||
+                      c.workMode === 'WFH' ||
+                      c.workMode === 'wfh';
+        
+        if (!isWFH) {
+          // Try to normalize the employeeId using our map
+          let normalizedId = employeeIdMap.get(c.employeeId);
+          
+          // If not found in map, try to find by matching with employee list
+          if (!normalizedId) {
+            const matchingEmp = employeesList.find(emp => {
+              const empId = emp.employeeId || emp.email?.split('@')[0] || '';
+              const emailPrefix = emp.email?.split('@')[0] || '';
+              return empId === c.employeeId || 
+                     emailPrefix === c.employeeId ||
+                     emp.email === c.employeeId ||
+                     emp.employeeId === c.employeeId;
+            });
+            
+            if (matchingEmp) {
+              normalizedId = matchingEmp.employeeId || matchingEmp.email?.split('@')[0] || c.employeeId;
+              employeeIdMap.set(c.employeeId, normalizedId);
+            } else {
+              normalizedId = c.employeeId;
+            }
+          }
+          
+          // Only add if not WFH and not on leave
+          if (!wfhEmployees.has(normalizedId) && !onLeaveEmployees.has(normalizedId)) {
+            presentEmployees.add(normalizedId);
+            console.log(`[attendance/stats] Found present check-in for employee: ${c.employeeId} (normalized: ${normalizedId}), checkInTime: ${c.checkInTime}`);
+          }
+        }
+      }
+    });
+    const presentCount = presentEmployees.size;
+    
+    console.log(`[attendance/stats] Present employees (excluding WFH and Leave): ${presentCount}`, Array.from(presentEmployees));
+
+    // Calculate absent count: Total employees - Present - On Leave - WFH
+    const absentCount = Math.max(0, totalEmployees - presentCount - onLeaveCount - onWFHCount);
+
+    // Count late check-ins (check-in after 9:00 AM)
     const lateCheckIns = todayCheckIns.filter(c => {
       if (!c.checkInTime) return false;
       const checkIn = new Date(c.checkInTime);
@@ -311,12 +774,27 @@ router.get('/attendance/stats', async (req, res) => {
     }).length;
 
     // Get pending attendance requests count
-    const requestsCol = db.collection('attendance_requests');
     const pendingRequests = await requestsCol.countDocuments({ 
       status: 'pending',
-      ...(company ? { company } : {})
+      ...(companyName ? { company: companyName } : {})
+    });
+    
+    console.log(`[attendance/stats] Stats for ${date}:`, {
+      totalEmployees,
+      presentCount,
+      absentCount,
+      onLeaveCount,
+      onWFHCount,
+      lateCheckIns,
+      pendingRequests
     });
 
+    // Set no-cache headers to prevent caching
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+    res.setHeader('X-Timestamp', Date.now().toString());
+    
     res.json({
       success: true,
       data: {
@@ -401,6 +879,7 @@ router.get('/attendance-requests', async (req, res) => {
           details: req.details,
           dateRange: req.dateRange,
           reason: req.reason,
+          leaveType: req.leaveType || null, // Include leave type if available
           approvedAt: req.approvedAt,
           rejectedAt: req.rejectedAt,
           approvedBy: req.approvedBy,
@@ -653,23 +1132,98 @@ router.post('/attendance-requests/:requestId/approve', async (req, res) => {
       return res.status(400).json({ success: false, error: 'Request ID is required' });
     }
 
+    console.log(`[hrms-portal] Approving request ${requestId} for company: ${company || 'default'}`);
+
     // Get employee database where attendance requests are stored
     const db = await getEmployeeDbForHrms(company);
     const col = db.collection('attendance_requests');
 
     const { ObjectId } = require('mongodb');
-    const request = await col.findOne({ _id: new ObjectId(requestId) });
+    
+    // Try multiple query formats to find the request
+    let request = null;
+    let updateQuery = null;
+    
+    // Try 1: ObjectId format (most common)
+    try {
+      if (ObjectId.isValid(requestId)) {
+        const objectIdQuery = { _id: new ObjectId(requestId) };
+        request = await col.findOne(objectIdQuery);
+        if (request) {
+          updateQuery = { _id: new ObjectId(requestId) };
+          console.log(`[hrms-portal] Found request using ObjectId format`);
+        }
+      }
+    } catch (e) {
+      console.log(`[hrms-portal] ObjectId conversion failed for ${requestId}:`, e.message);
+    }
+    
+    // Try 2: String _id format
+    if (!request) {
+      const stringIdQuery = { _id: requestId };
+      request = await col.findOne(stringIdQuery);
+      if (request) {
+        updateQuery = { _id: requestId };
+        console.log(`[hrms-portal] Found request using string _id format`);
+      }
+    }
+    
+    // Try 3: id field format (if requests have an id field separate from _id)
+    if (!request) {
+      const idFieldQuery = { id: requestId };
+      request = await col.findOne(idFieldQuery);
+      if (request) {
+        updateQuery = { id: requestId };
+        console.log(`[hrms-portal] Found request using id field format`);
+      }
+    }
+
+    // Try 4: Check all documents and find by matching string representation of _id
+    if (!request) {
+      console.log(`[hrms-portal] Trying to find request by scanning collection...`);
+      const allRequests = await col.find({}).toArray();
+      console.log(`[hrms-portal] Found ${allRequests.length} total requests in collection`);
+      
+      for (const req of allRequests) {
+        const reqIdStr = req._id ? req._id.toString() : '';
+        if (reqIdStr === requestId || req.id === requestId) {
+          request = req;
+          updateQuery = { _id: req._id };
+          console.log(`[hrms-portal] Found request by scanning: ${reqIdStr}`);
+          break;
+        }
+      }
+    }
 
     if (!request) {
-      return res.status(404).json({ success: false, error: 'Request not found' });
+      console.error(`[hrms-portal] Request not found with ID: ${requestId} in company: ${company || 'default'}`);
+      console.error(`[hrms-portal] Available request IDs in collection (first 5):`);
+      try {
+        const sampleRequests = await col.find({}).limit(5).toArray();
+        sampleRequests.forEach((req, idx) => {
+          console.error(`  ${idx + 1}. _id: ${req._id}, id: ${req.id || 'N/A'}, employeeId: ${req.employeeId || 'N/A'}`);
+        });
+      } catch (e) {
+        console.error(`[hrms-portal] Could not fetch sample requests:`, e.message);
+      }
+      
+      return res.status(404).json({ 
+        success: false, 
+        error: `Request not found with ID: ${requestId}. Please refresh the page and try again.` 
+      });
     }
 
+    // Check if request is already processed
     if (request.status !== 'pending') {
-      return res.status(400).json({ success: false, error: 'Request is not pending' });
+      return res.status(400).json({ 
+        success: false, 
+        error: `Request is already ${request.status}. Cannot approve again.` 
+      });
     }
 
-    await col.updateOne(
-      { _id: new ObjectId(requestId) },
+    // Perform the update
+    const updateResult = await col.updateOne(
+      updateQuery,
       {
         $set: {
           status: 'approved',
@@ -680,7 +1234,20 @@ router.post('/attendance-requests/:requestId/approve', async (req, res) => {
       }
     );
 
-    console.log(`[hrms-portal] Attendance request ${requestId} approved by ${approvedBy || 'Admin'}`);
+    if (updateResult.matchedCount === 0) {
+      console.error(`[hrms-portal] Update failed - no document matched for ID: ${requestId}`);
+      console.error(`[hrms-portal] Update query used:`, JSON.stringify(updateQuery));
+      return res.status(404).json({ 
+        success: false, 
+        error: 'Request not found or could not be updated' 
+      });
+    }
+
+    if (updateResult.modifiedCount === 0) {
+      console.warn(`[hrms-portal] Update matched but did not modify - request may already be approved`);
+    }
+
+    console.log(`[hrms-portal] ✅ Attendance request ${requestId} approved by ${approvedBy || 'Admin'}`);
 
     res.json({
       success: true,
@@ -691,10 +1258,11 @@ router.post('/attendance-requests/:requestId/approve', async (req, res) => {
       }
     });
   } catch (error) {
-    console.error('HRMS approve attendance-request error:', error);
+    console.error('[hrms-portal] ❌ Approve attendance-request error:', error);
+    console.error('[hrms-portal] Error stack:', error.stack);
     res.status(500).json({
       success: false,
-      error: 'Internal server error'
+      error: error.message || 'Internal server error. Please try again or contact support.'
     });
   }
 });
@@ -716,6 +1284,9 @@ router.post('/attendance-requests/:requestId/reject', async (req, res) => {
     const col = db.collection('attendance_requests');
 
     const { ObjectId } = require('mongodb');
+    if (!ObjectId.isValid(requestId)) {
+      return res.status(400).json({ success: false, error: 'Invalid request ID' });
+    }
     const request = await col.findOne({ _id: new ObjectId(requestId) });
 
     if (!request) {
@@ -754,6 +1325,220 @@ router.post('/attendance-requests/:requestId/reject', async (req, res) => {
     res.status(500).json({
       success: false,
       error: 'Internal server error'
+    });
+  }
+});
+
+// Update attendance request (edit)
+router.put('/attendance-requests/:requestId', async (req, res) => {
+  try {
+    await connectMongo();
+    const { requestId } = req.params;
+    const company = getCompanyFromRequest(req);
+
+    if (!requestId) {
+      return res.status(400).json({ success: false, error: 'Request ID is required' });
+    }
+
+    const db = await getEmployeeDbForHrms(company);
+    const col = db.collection('attendance_requests');
+
+    const { ObjectId } = require('mongodb');
+    if (!ObjectId.isValid(requestId)) {
+      return res.status(400).json({ success: false, error: 'Invalid request ID' });
+    }
+
+    const existing = await col.findOne({ _id: new ObjectId(requestId) });
+    if (!existing) {
+      return res.status(404).json({ success: false, error: 'Request not found' });
+    }
+
+    // Safety: only allow editing pending requests (can be relaxed later if needed)
+    if (existing.status && existing.status !== 'pending') {
+      return res.status(400).json({ success: false, error: 'Only pending requests can be edited' });
+    }
+
+    const { leaveType, reason, from, to, dateRange } = req.body || {};
+
+    // Build update fields (only allow known fields)
+    const update = { updatedAt: new Date() };
+
+    if (typeof leaveType === 'string') update.leaveType = leaveType;
+    if (typeof reason === 'string') update.reason = reason;
+
+    let normalizedFrom = typeof from === 'string' ? from.trim() : '';
+    let normalizedTo = typeof to === 'string' ? to.trim() : '';
+
+    const parseDate = (s) => {
+      const d = new Date(s);
+      return isNaN(d.getTime()) ? null : d;
+    };
+
+    const fromDate = normalizedFrom ? parseDate(normalizedFrom) : null;
+    const toDate = normalizedTo ? parseDate(normalizedTo) : null;
+
+    if ((normalizedFrom && !fromDate) || (normalizedTo && !toDate)) {
+      return res.status(400).json({ success: false, error: 'Invalid from/to date' });
+    }
+
+    if (fromDate && toDate && fromDate > toDate) {
+      return res.status(400).json({ success: false, error: 'From date cannot be after To date' });
+    }
+
+    // Store from/to if provided
+    if (fromDate) update.from = fromDate.toISOString().split('T')[0];
+    if (toDate) update.to = toDate.toISOString().split('T')[0];
+
+    // Prefer dateRange if explicitly provided; otherwise build it from from/to if both exist
+    if (typeof dateRange === 'string' && dateRange.trim()) {
+      update.dateRange = dateRange.trim();
+    } else if (fromDate && toDate) {
+      update.dateRange = `${update.from} - ${update.to}`;
+    }
+
+    await col.updateOne({ _id: new ObjectId(requestId) }, { $set: update });
+
+    res.json({
+      success: true,
+      message: 'Request updated successfully',
+      data: { requestId },
+    });
+  } catch (error) {
+    console.error('HRMS update attendance-request error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Internal server error',
+    });
+  }
+});
+
+// Delete attendance request
+router.delete('/attendance-requests/:requestId', async (req, res) => {
+  try {
+    await connectMongo();
+    const { requestId } = req.params;
+    const company = getCompanyFromRequest(req);
+
+    if (!requestId) {
+      return res.status(400).json({ success: false, error: 'Request ID is required' });
+    }
+
+    const db = await getEmployeeDbForHrms(company);
+    const col = db.collection('attendance_requests');
+
+    const { ObjectId } = require('mongodb');
+    if (!ObjectId.isValid(requestId)) {
+      return res.status(400).json({ success: false, error: 'Invalid request ID' });
+    }
+
+    const existing = await col.findOne({ _id: new ObjectId(requestId) });
+    if (!existing) {
+      return res.status(404).json({ success: false, error: 'Request not found' });
+    }
+
+    // Safety: only allow deleting pending requests (can be relaxed later if needed)
+    if (existing.status && existing.status !== 'pending') {
+      return res.status(400).json({ success: false, error: 'Only pending requests can be deleted' });
+    }
+
+    await col.deleteOne({ _id: new ObjectId(requestId) });
+
+    res.json({
+      success: true,
+      message: 'Request deleted successfully',
+      data: { requestId },
+    });
+  } catch (error) {
+    console.error('HRMS delete attendance-request error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Internal server error',
+    });
+  }
+});
+
+// Create attendance request (admin - Add Leave Request)
+router.post('/attendance-requests', async (req, res) => {
+  try {
+    await connectMongo();
+    const company = getCompanyFromRequest(req);
+
+    const {
+      employeeId,
+      leaveType,
+      from,
+      to,
+      reason,
+      type,
+      notes,
+      details,
+      location,
+    } = req.body || {};
+
+    if (!employeeId || typeof employeeId !== 'string') {
+      return res.status(400).json({ success: false, error: 'employeeId is required' });
+    }
+    if (!leaveType || typeof leaveType !== 'string') {
+      return res.status(400).json({ success: false, error: 'leaveType is required' });
+    }
+    if (!from || !to) {
+      return res.status(400).json({ success: false, error: 'from and to are required' });
+    }
+
+    const parseDate = (s) => {
+      const d = new Date(s);
+      return isNaN(d.getTime()) ? null : d;
+    };
+
+    const fromDate = parseDate(from);
+    const toDate = parseDate(to);
+    if (!fromDate || !toDate) {
+      return res.status(400).json({ success: false, error: 'Invalid from/to date' });
+    }
+    if (fromDate > toDate) {
+      return res.status(400).json({ success: false, error: 'From date cannot be after To date' });
+    }
+
+    const normalizedFrom = fromDate.toISOString().split('T')[0];
+    const normalizedTo = toDate.toISOString().split('T')[0];
+
+    const db = await getEmployeeDbForHrms(company);
+    const col = db.collection('attendance_requests');
+
+    const doc = {
+      employeeId: employeeId.trim(),
+      type: typeof type === 'string' && type.trim() ? type.trim() : 'time-off',
+      status: 'pending',
+      submittedAt: new Date(),
+      updatedAt: new Date(),
+      company: company || null,
+      leaveType: leaveType.trim(),
+      from: normalizedFrom,
+      to: normalizedTo,
+      dateRange: `${normalizedFrom} - ${normalizedTo}`,
+      reason: typeof reason === 'string' ? reason : '',
+      notes: typeof notes === 'string' ? notes : undefined,
+      details: typeof details === 'string' ? details : undefined,
+      location: typeof location === 'string' ? location : undefined,
+    };
+
+    // remove undefined fields
+    Object.keys(doc).forEach((k) => doc[k] === undefined && delete doc[k]);
+
+    const result = await col.insertOne(doc);
+
+    res.json({
+      success: true,
+      message: 'Request created successfully',
+      data: {
+        requestId: result.insertedId?.toString?.() || result.insertedId,
+      },
+    });
+  } catch (error) {
+    console.error('HRMS create attendance-request error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Internal server error',
     });
   }
 });
@@ -873,6 +1658,1803 @@ router.put('/leave-policy', async (req, res) => {
     });
   } catch (error) {
     console.error('HRMS leave-policy PUT error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Internal server error'
+    });
+  }
+});
+
+// Get recruitment analytics
+router.get('/recruitment/analytics', async (req, res) => {
+  try {
+    await connectMongo();
+    const company = getCompanyFromRequest(req);
+    const { month, hr, department } = req.query;
+    
+    // Get HRMS database
+    const db = await getHrmsDb(company);
+    const recruitmentCol = db.collection('recruitment');
+    
+    // Build query filters
+    const query = {};
+    if (hr && hr !== 'All HRs') {
+      query.assignedTo = hr;
+    }
+    if (department && department !== 'All Departments') {
+      query.department = department;
+    }
+    
+    // Get all recruitment records
+    const allRecords = await recruitmentCol.find(query).toArray();
+    
+    // Calculate date range based on month filter
+    const now = new Date();
+    let startDate, endDate;
+    
+    switch (month) {
+      case 'Last Month':
+        startDate = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+        endDate = new Date(now.getFullYear(), now.getMonth(), 0);
+        break;
+      case 'Last 3 Months':
+        startDate = new Date(now.getFullYear(), now.getMonth() - 3, 1);
+        endDate = new Date(now.getFullYear(), now.getMonth() + 1, 0);
+        break;
+      case 'Last 6 Months':
+        startDate = new Date(now.getFullYear(), now.getMonth() - 6, 1);
+        endDate = new Date(now.getFullYear(), now.getMonth() + 1, 0);
+        break;
+      case 'This Year':
+        startDate = new Date(now.getFullYear(), 0, 1);
+        endDate = new Date(now.getFullYear(), 11, 31);
+        break;
+      default: // This Month
+        startDate = new Date(now.getFullYear(), now.getMonth(), 1);
+        endDate = new Date(now.getFullYear(), now.getMonth() + 1, 0);
+    }
+    
+    // Filter records by date if assignDate exists
+    const filteredRecords = allRecords.filter(record => {
+      if (!record.assignDate) return true;
+      const recordDate = new Date(record.assignDate);
+      return recordDate >= startDate && recordDate <= endDate;
+    });
+    
+    // Calculate KPIs
+    const totalActiveJobs = new Set(filteredRecords.map(r => r.position || r.jobTitle).filter(Boolean)).size;
+    const totalApplications = filteredRecords.length;
+    const shortlisted = filteredRecords.filter(r => r.status === 'Shortlisted' || r.status === 'shortlisted').length;
+    const interviewsScheduled = filteredRecords.filter(r => r.status === 'Interview Scheduled' || r.status === 'Interview Aligned' || r.status === 'interview_scheduled').length;
+    const offersSent = filteredRecords.filter(r => r.status === 'Offer Sent' || r.status === 'Finalized' || r.status === 'offer_sent').length;
+    const hired = filteredRecords.filter(r => r.status === 'Hired' || r.hiringStatus === 'Hired' || r.status === 'hired').length;
+    
+    // Calculate averages (simplified - would need more data for accurate calculations)
+    const avgTimeToHire = hired > 0 ? (totalApplications / hired).toFixed(1) + '%' : '0%';
+    const avgInterviewTime = interviewsScheduled > 0 ? Math.round(totalApplications / interviewsScheduled) + ' Days' : '0 Days';
+    const avgOfferAcceptanceRate = offersSent > 0 ? Math.round((hired / offersSent) * 100) + '%' : '0%';
+    const offerRejectionRate = offersSent > 0 ? ((offersSent - hired) / offersSent * 100).toFixed(1) + '%' : '0%';
+    
+    // Get HR list for filters
+    const { getUsersCollection } = require('../../config/mongo');
+    let companyName = company;
+    if (!companyName || companyName === '1' || companyName === 'undefined') {
+      companyName = 'Ecosoul Home';
+    }
+    
+    let hrList = [];
+    try {
+      const usersCol = await getUsersCollection(null, companyName);
+      const employees = await usersCol.find({ role: { $in: ['hr', 'HR', 'recruiter', 'Recruiter'] } }).toArray();
+      hrList = employees.map(emp => emp.name || emp.firstName || 'Unknown').filter(Boolean);
+    } catch (err) {
+      console.error('Error fetching HR list:', err);
+    }
+    
+    // Candidate for Interview in Pipeline by HR
+    const pipelineByHR = {};
+    filteredRecords.forEach(record => {
+      if (record.status === 'Interview Scheduled' || record.status === 'Interview Aligned' || record.status === 'interview_scheduled') {
+        const hrName = record.assignedTo || 'Unknown';
+        if (!pipelineByHR[hrName]) {
+          pipelineByHR[hrName] = 0;
+        }
+        pipelineByHR[hrName]++;
+      }
+    });
+    
+    const pipelineByHRArray = Object.entries(pipelineByHR).map(([name, candidates]) => ({
+      name,
+      candidates,
+      percentage: totalApplications > 0 ? ((candidates / totalApplications) * 100).toFixed(1) : 0
+    }));
+    
+    // Recruitment Funnel (status distribution)
+    const statusCounts = {};
+    filteredRecords.forEach(record => {
+      const status = record.status || 'New';
+      statusCounts[status] = (statusCounts[status] || 0) + 1;
+    });
+    
+    const recruitmentFunnel = [
+      { stage: 'New', candidates: statusCounts['New'] || 0, percentage: totalApplications > 0 ? (((statusCounts['New'] || 0) / totalApplications) * 100).toFixed(1) : 0 },
+      { stage: 'Shortlisted', candidates: statusCounts['Shortlisted'] || 0, percentage: totalApplications > 0 ? (((statusCounts['Shortlisted'] || 0) / totalApplications) * 100).toFixed(1) : 0 },
+      { stage: 'Screening', candidates: statusCounts['Screening'] || 0, percentage: totalApplications > 0 ? (((statusCounts['Screening'] || 0) / totalApplications) * 100).toFixed(1) : 0 },
+      { stage: 'Interview Aligned', candidates: statusCounts['Interview Aligned'] || statusCounts['Interview Scheduled'] || 0, percentage: totalApplications > 0 ? (((statusCounts['Interview Aligned'] || statusCounts['Interview Scheduled'] || 0) / totalApplications) * 100).toFixed(1) : 0 },
+      { stage: 'Feedback Call', candidates: statusCounts['Feedback Call'] || 0, percentage: totalApplications > 0 ? (((statusCounts['Feedback Call'] || 0) / totalApplications) * 100).toFixed(1) : 0 },
+      { stage: 'Finalized', candidates: statusCounts['Finalized'] || statusCounts['Offer Sent'] || 0, percentage: totalApplications > 0 ? (((statusCounts['Finalized'] || statusCounts['Offer Sent'] || 0) / totalApplications) * 100).toFixed(1) : 0 },
+      { stage: 'Hired', candidates: statusCounts['Hired'] || 0, percentage: totalApplications > 0 ? (((statusCounts['Hired'] || 0) / totalApplications) * 100).toFixed(1) : 0 },
+      { stage: 'On Hold', candidates: statusCounts['On Hold'] || 0, percentage: totalApplications > 0 ? (((statusCounts['On Hold'] || 0) / totalApplications) * 100).toFixed(1) : 0 },
+    ];
+    
+    // Today's Calls by HR (using callingDate or assignDate)
+    const today = new Date().toISOString().split('T')[0];
+    const todayCalls = {};
+    filteredRecords.forEach(record => {
+      const callDate = record.callingDate ? new Date(record.callingDate).toISOString().split('T')[0] : 
+                      (record.assignDate ? new Date(record.assignDate).toISOString().split('T')[0] : null);
+      if (callDate === today) {
+        const hrName = record.assignedTo || 'Unknown';
+        todayCalls[hrName] = (todayCalls[hrName] || 0) + 1;
+      }
+    });
+    
+    const todaysCallsData = Object.entries(todayCalls).map(([name, calls]) => ({ name, calls }));
+    
+    // HR Performance Comparison
+    const hrPerformance = {};
+    filteredRecords.forEach(record => {
+      const hrName = record.assignedTo || 'Unknown';
+      if (!hrPerformance[hrName]) {
+        hrPerformance[hrName] = { shortlisted: 0, positioned: 0 };
+      }
+      if (record.status === 'Shortlisted' || record.status === 'shortlisted') {
+        hrPerformance[hrName].shortlisted++;
+      }
+      if (record.status === 'Finalized' || record.status === 'Offer Sent' || record.status === 'Hired') {
+        hrPerformance[hrName].positioned++;
+      }
+    });
+    
+    const hrPerformanceData = Object.entries(hrPerformance).map(([name, data]) => ({
+      name,
+      shortlisted: data.shortlisted,
+      positioned: data.positioned
+    }));
+    
+    // Location Based Hiring Distribution
+    const locationCounts = {};
+    filteredRecords.forEach(record => {
+      if (record.status === 'Hired' || record.hiringStatus === 'Hired') {
+        const location = record.currentLocation || record.location || 'Unknown';
+        locationCounts[location] = (locationCounts[location] || 0) + 1;
+      }
+    });
+    
+    const locationData = Object.entries(locationCounts).map(([name, value]) => ({ name, value }));
+    
+    // HR Activity Table
+    const hrActivity = {};
+    filteredRecords.forEach(record => {
+      const hrName = record.assignedTo || 'Unknown';
+      if (!hrActivity[hrName]) {
+        hrActivity[hrName] = {
+          totalCalls: 0,
+          shortlisted: 0,
+          interviewsScheduled: 0,
+          offersSent: 0,
+          hiresClosed: 0
+        };
+      }
+      
+      // Count calls (records with callingDate or assignDate)
+      if (record.callingDate || record.assignDate) {
+        hrActivity[hrName].totalCalls++;
+      }
+      
+      if (record.status === 'Shortlisted' || record.status === 'shortlisted') {
+        hrActivity[hrName].shortlisted++;
+      }
+      if (record.status === 'Interview Scheduled' || record.status === 'Interview Aligned') {
+        hrActivity[hrName].interviewsScheduled++;
+      }
+      if (record.status === 'Offer Sent' || record.status === 'Finalized') {
+        hrActivity[hrName].offersSent++;
+      }
+      if (record.status === 'Hired' || record.hiringStatus === 'Hired') {
+        hrActivity[hrName].hiresClosed++;
+      }
+    });
+    
+    const hrActivityData = Object.entries(hrActivity).map(([hrName, data]) => {
+      const conversion = data.totalCalls > 0 ? ((data.hiresClosed / data.totalCalls) * 100).toFixed(1) : 0;
+      return {
+        hrName,
+        totalCalls: data.totalCalls,
+        shortlisted: data.shortlisted,
+        interviewsScheduled: data.interviewsScheduled,
+        offersSent: data.offersSent,
+        hiresClosed: data.hiresClosed,
+        conversion: parseFloat(conversion),
+        avgResponseTime: '2.5 hrs' // Would need additional data to calculate
+      };
+    });
+    
+    // Recent Activity Log (last 10 activities)
+    const recentActivities = filteredRecords
+      .sort((a, b) => {
+        const dateA = new Date(a.assignDate || a.callingDate || a.createdAt || 0);
+        const dateB = new Date(b.assignDate || b.callingDate || b.createdAt || 0);
+        return dateB - dateA;
+      })
+      .slice(0, 10)
+      .map(record => {
+        let status = 'Pending';
+        let statusColor = 'bg-yellow-500';
+        
+        if (record.status === 'Hired' || record.hiringStatus === 'Hired') {
+          status = 'Approved';
+          statusColor = 'bg-green-500';
+        } else if (record.status === 'Rejected' || record.hiringStatus === 'Rejected') {
+          status = 'Failed';
+          statusColor = 'bg-red-500';
+        } else if (record.status === 'Shortlisted' || record.status === 'Interview Scheduled') {
+          status = 'Approved';
+          statusColor = 'bg-green-500';
+        }
+        
+        return {
+          hr: record.assignedTo || 'Unknown',
+          activity: record.status || 'Activity',
+          status,
+          statusColor
+        };
+      });
+    
+    res.json({
+      success: true,
+      data: {
+        kpiCards: {
+          totalActiveJobs,
+          totalApplications,
+          shortlisted,
+          interviewsScheduled,
+          offersSent,
+          hired,
+          avgTimeToHire,
+          avgInterviewTime,
+          avgOfferAcceptanceRate,
+          offerRejectionRate
+        },
+        pipelineByHR: pipelineByHRArray,
+        recruitmentFunnel,
+        todaysCallsData,
+        hrPerformanceData,
+        locationData,
+        hrActivityData,
+        recentActivities,
+        hrList,
+        departments: ['Engineering', 'Sales', 'Marketing', 'HR', 'Operations'] // Would come from departments collection
+      }
+    });
+  } catch (error) {
+    console.error('HRMS recruitment analytics error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Internal server error'
+    });
+  }
+});
+
+// Get recruitment candidates (for Sourcing & Screening)
+router.get('/recruitment/candidates', async (req, res) => {
+  try {
+    await connectMongo();
+    const company = getCompanyFromRequest(req);
+    const { status, recruiter, experience, search } = req.query;
+    
+    // For HRMS Admin Portal - get data from all companies if no company specified
+    let candidates = [];
+    
+    if (!company || company === 'all' || company === 'undefined') {
+      // Get all databases and aggregate data
+      const dbs = await getAllHrmsDbs();
+      const allCandidatesPromises = dbs.map(async (db) => {
+        const recruitmentCol = db.collection('recruitment');
+        
+        // Build query filters
+        const query = {};
+        if (status && status !== 'All Status') {
+          query.status = status;
+        }
+        if (recruiter && recruiter !== 'All Recruiters') {
+          query.assignedTo = recruiter;
+        }
+        
+        // Search filter
+        if (search) {
+          query.$or = [
+            { candidateName: { $regex: search, $options: 'i' } },
+            { email: { $regex: search, $options: 'i' } },
+            { contactNumber: { $regex: search, $options: 'i' } },
+            { currentOrganisation: { $regex: search, $options: 'i' } }
+          ];
+        }
+        
+        return await recruitmentCol.find(query).toArray();
+      });
+      
+      const allCandidatesArrays = await Promise.all(allCandidatesPromises);
+      candidates = allCandidatesArrays.flat();
+    } else {
+      // Get HRMS database for specific company
+      const db = await getHrmsDb(company);
+      const recruitmentCol = db.collection('recruitment');
+      
+      // Build query filters
+      const query = {};
+      if (status && status !== 'All Status') {
+        query.status = status;
+      }
+      if (recruiter && recruiter !== 'All Recruiters') {
+        query.assignedTo = recruiter;
+      }
+      
+      // Search filter
+      if (search) {
+        query.$or = [
+          { candidateName: { $regex: search, $options: 'i' } },
+          { email: { $regex: search, $options: 'i' } },
+          { contactNumber: { $regex: search, $options: 'i' } },
+          { currentOrganisation: { $regex: search, $options: 'i' } }
+        ];
+      }
+      
+      // Get all candidates
+      candidates = await recruitmentCol.find(query).toArray();
+    }
+    
+    // Filter by experience if provided
+    let filteredCandidates = candidates;
+    if (experience && experience !== 'All Experience') {
+      filteredCandidates = candidates.filter(candidate => {
+        const exp = candidate.totalExperience || '';
+        const expYears = parseFloat(exp) || 0;
+        
+        if (experience === '0-2 Years') return expYears >= 0 && expYears < 2;
+        if (experience === '2-5 Years') return expYears >= 2 && expYears < 5;
+        if (experience === '5-10 Years') return expYears >= 5 && expYears < 10;
+        if (experience === '10+ Years') return expYears >= 10;
+        return true;
+      });
+    }
+    
+    // Transform candidates to match frontend format
+    const transformedCandidates = filteredCandidates.map((candidate, index) => {
+      const statusColors = {
+        'New': 'bg-blue-100 text-blue-700',
+        'Shortlisted': 'bg-purple-100 text-purple-700',
+        'In Interview': 'bg-yellow-100 text-yellow-700',
+        'Interview Scheduled': 'bg-yellow-100 text-yellow-700',
+        'Interview Aligned': 'bg-yellow-100 text-yellow-700',
+        'Feedback Call': 'bg-orange-100 text-orange-700',
+        'Finalized': 'bg-indigo-100 text-indigo-700',
+        'Hired': 'bg-green-100 text-green-700',
+        'On Hold': 'bg-slate-100 text-slate-700',
+      };
+      
+      const status = candidate.status || 'New';
+      const assignDate = candidate.assignDate ? new Date(candidate.assignDate).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : 'N/A';
+      
+      return {
+        id: candidate._id?.toString() || index + 1,
+        name: candidate.candidateName || 'Unknown',
+        contact: candidate.contactNumber || 'N/A',
+        email: candidate.email || 'N/A',
+        organisation: candidate.currentOrganisation || 'N/A',
+        education: candidate.education || 'N/A',
+        experience: candidate.totalExperience || 'N/A',
+        assignedTo: candidate.assignedTo || 'Unassigned',
+        assignDate: assignDate,
+        status: status,
+        statusColor: statusColors[status] || 'bg-slate-100 text-slate-700',
+        folderName: candidate.folderName || 'N/A'
+      };
+    });
+    
+    // Calculate KPIs
+    const totalCandidates = transformedCandidates.length;
+    const shortlisted = transformedCandidates.filter(c => c.status === 'Shortlisted').length;
+    const inInterview = transformedCandidates.filter(c => c.status === 'In Interview' || c.status === 'Interview Scheduled' || c.status === 'Interview Aligned').length;
+    const hired = transformedCandidates.filter(c => c.status === 'Hired').length;
+    const onHold = transformedCandidates.filter(c => c.status === 'On Hold').length;
+    
+    // Get HR list for filters - aggregate from all companies for admin portal
+    const { getUsersCollection } = require('../../config/mongo');
+    let hrList = [];
+    const hrSet = new Set();
+    
+    try {
+      if (!company || company === 'all' || company === 'undefined') {
+        // Get HRs from all companies for admin portal
+        const companyNames = ['Ecosoul Home', 'Thrive'];
+        for (const companyName of companyNames) {
+          try {
+            const usersCol = await getUsersCollection(null, companyName);
+            const employees = await usersCol.find({ role: { $in: ['hr', 'HR', 'recruiter', 'Recruiter'] } }).toArray();
+            employees.forEach(emp => {
+              const name = emp.name || emp.firstName;
+              if (name && name !== 'Unknown') {
+                hrSet.add(name);
+              }
+            });
+          } catch (err) {
+            // Continue to next company
+          }
+        }
+        hrList = Array.from(hrSet);
+      } else {
+        // Get HRs from specific company
+        const usersCol = await getUsersCollection(null, company);
+        const employees = await usersCol.find({ role: { $in: ['hr', 'HR', 'recruiter', 'Recruiter'] } }).toArray();
+        hrList = employees.map(emp => emp.name || emp.firstName || 'Unknown').filter(Boolean);
+      }
+    } catch (err) {
+      console.error('Error fetching HR list:', err);
+    }
+    
+    res.json({
+      success: true,
+      data: {
+        candidates: transformedCandidates,
+        kpis: {
+          totalCandidates,
+          shortlisted,
+          inInterview,
+          hired,
+          onHold
+        },
+        hrList: ['All Recruiters', ...hrList]
+      }
+    });
+  } catch (error) {
+    console.error('HRMS recruitment candidates error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Internal server error'
+    });
+  }
+});
+
+// Get recruitment hiring candidates (for Recruitment & Hiring)
+router.get('/recruitment/hiring', async (req, res) => {
+  try {
+    await connectMongo();
+    const company = getCompanyFromRequest(req);
+    const { status, recruiter, search } = req.query;
+    
+    // For HRMS Admin Portal - get data from all companies if no company specified
+    let candidates = [];
+    
+    if (!company || company === 'all' || company === 'undefined') {
+      // Get all databases and aggregate data
+      const dbs = await getAllHrmsDbs();
+      const allCandidatesPromises = dbs.map(async (db) => {
+        const recruitmentCol = db.collection('recruitment');
+        
+        // Build query - candidates with interview status = Finalized, or with hiringStatus (Hired/Rejected/Awaiting)
+        const query = {
+          $or: [
+            { status: 'Finalized' },
+            { interviewStatus: 'Finalized' },
+            { status: 'Offer Sent' },
+            { hiringStatus: { $exists: true, $ne: null } }, // Include candidates with hiringStatus (Hired, Rejected, Awaiting)
+            { status: 'Rejected' }, // Include rejected candidates
+            { status: 'Hired' } // Include hired candidates
+          ]
+        };
+        
+        if (status && status !== 'All Status') {
+          if (status === 'Finalized') {
+            query.$or = [{ status: 'Finalized' }, { interviewStatus: 'Finalized' }];
+          } else {
+            query.status = status;
+          }
+        }
+        
+        if (recruiter && recruiter !== 'All Recruiters') {
+          query.assignedTo = recruiter;
+        }
+        
+        if (search) {
+          query.$and = query.$and || [];
+          query.$and.push({
+            $or: [
+              { candidateName: { $regex: search, $options: 'i' } },
+              { email: { $regex: search, $options: 'i' } },
+              { contactNumber: { $regex: search, $options: 'i' } },
+              { currentOrganisation: { $regex: search, $options: 'i' } }
+            ]
+          });
+        }
+        
+        return await recruitmentCol.find(query).toArray();
+      });
+      
+      const allCandidatesArrays = await Promise.all(allCandidatesPromises);
+      candidates = allCandidatesArrays.flat();
+    } else {
+      // Get HRMS database for specific company
+      const db = await getHrmsDb(company);
+      const recruitmentCol = db.collection('recruitment');
+      
+      // Build query - candidates with interview status = Finalized, or with hiringStatus (Hired/Rejected/Awaiting)
+      const query = {
+        $or: [
+          { status: 'Finalized' },
+          { interviewStatus: 'Finalized' },
+          { status: 'Offer Sent' },
+          { hiringStatus: { $exists: true, $ne: null } }, // Include candidates with hiringStatus (Hired, Rejected, Awaiting)
+          { status: 'Rejected' }, // Include rejected candidates
+          { status: 'Hired' } // Include hired candidates
+        ]
+      };
+      
+      if (status && status !== 'All Status') {
+        if (status === 'Finalized') {
+          query.$or = [{ status: 'Finalized' }, { interviewStatus: 'Finalized' }];
+        } else {
+          query.status = status;
+        }
+      }
+      
+      if (recruiter && recruiter !== 'All Recruiters') {
+        query.assignedTo = recruiter;
+      }
+      
+      if (search) {
+        query.$and = query.$and || [];
+        query.$and.push({
+          $or: [
+            { candidateName: { $regex: search, $options: 'i' } },
+            { email: { $regex: search, $options: 'i' } },
+            { contactNumber: { $regex: search, $options: 'i' } },
+            { currentOrganisation: { $regex: search, $options: 'i' } }
+          ]
+        });
+      }
+      
+      candidates = await recruitmentCol.find(query).toArray();
+    }
+    
+    // Transform candidates
+    const transformedCandidates = candidates.map((candidate, index) => {
+      const hiringStatus = candidate.hiringStatus || 'Awaiting';
+      const hiringStatusColors = {
+        'Hired': 'bg-green-100 text-green-700',
+        'Rejected': 'bg-red-100 text-red-700',
+        'Awaiting': 'bg-orange-100 text-orange-700'
+      };
+      
+      return {
+        id: candidate._id?.toString() || index + 1,
+        name: candidate.candidateName || 'Unknown',
+        email: candidate.email || 'N/A',
+        contact: candidate.contactNumber || 'N/A',
+        organisation: candidate.currentOrganisation || 'N/A',
+        assignedTo: candidate.assignedTo || 'Unassigned',
+        interviewStatus: 'Finalized',
+        interviewStatusColor: 'bg-green-100 text-green-700',
+        hiringStatus: hiringStatus,
+        hiringStatusColor: hiringStatusColors[hiringStatus] || 'bg-orange-100 text-orange-700',
+        activeAction: hiringStatus.toLowerCase()
+      };
+    });
+    
+    // Calculate KPIs
+    const totalCandidates = transformedCandidates.length;
+    const hired = transformedCandidates.filter(c => c.hiringStatus === 'Hired').length;
+    const rejected = transformedCandidates.filter(c => c.hiringStatus === 'Rejected').length;
+    const awaiting = transformedCandidates.filter(c => c.hiringStatus === 'Awaiting').length;
+    
+    // Get HR list - aggregate from all companies for admin portal
+    const { getUsersCollection } = require('../../config/mongo');
+    let hrList = [];
+    const hrSet = new Set();
+    
+    try {
+      if (!company || company === 'all' || company === 'undefined') {
+        // Get HRs from all companies
+        const companyNames = ['Ecosoul Home', 'Thrive'];
+        for (const companyName of companyNames) {
+          try {
+            const usersCol = await getUsersCollection(null, companyName);
+            const employees = await usersCol.find({ role: { $in: ['hr', 'HR', 'recruiter', 'Recruiter'] } }).toArray();
+            employees.forEach(emp => {
+              const name = emp.name || emp.firstName;
+              if (name && name !== 'Unknown') {
+                hrSet.add(name);
+              }
+            });
+          } catch (err) {
+            // Continue to next company
+          }
+        }
+        hrList = Array.from(hrSet);
+      } else {
+        // Get HRs from specific company
+        const usersCol = await getUsersCollection(null, company);
+        const employees = await usersCol.find({ role: { $in: ['hr', 'HR', 'recruiter', 'Recruiter'] } }).toArray();
+        hrList = employees.map(emp => emp.name || emp.firstName || 'Unknown').filter(Boolean);
+      }
+    } catch (err) {
+      console.error('Error fetching HR list:', err);
+    }
+    
+    res.json({
+      success: true,
+      data: {
+        candidates: transformedCandidates,
+        kpis: {
+          totalCandidates,
+          hired,
+          rejected,
+          awaiting
+        },
+        hrList: ['All Recruiters', ...hrList]
+      }
+    });
+  } catch (error) {
+    console.error('HRMS recruitment hiring error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Internal server error'
+    });
+  }
+});
+
+// Get onboarding candidates (for Onboarding)
+router.get('/recruitment/onboarding', async (req, res) => {
+  try {
+    await connectMongo();
+    const company = getCompanyFromRequest(req);
+    const { status, stage, recruiter, search } = req.query;
+    
+    // For HRMS Admin Portal - get data from all companies if no company specified
+    let candidates = [];
+    
+    if (!company || company === 'all' || company === 'undefined') {
+      // Get all databases and aggregate data
+      const dbs = await getAllHrmsDbs();
+      const allCandidatesPromises = dbs.map(async (db) => {
+        const recruitmentCol = db.collection('recruitment');
+        
+        // Build query - candidates with offer accepted or hired
+        const query = {
+          $or: [
+            { hiringStatus: 'Hired' },
+            { offerStatus: 'Accepted' },
+            { status: 'Hired' }
+          ]
+        };
+        
+        if (status && status !== 'All Status') {
+          if (status === 'Accepted') {
+            query.$or = [{ offerStatus: 'Accepted' }, { hiringStatus: 'Hired' }];
+          } else {
+            query.offerStatus = status;
+          }
+        }
+        
+        if (stage && stage !== 'All Stages') {
+          query.onboardingStage = stage;
+        }
+        
+        if (recruiter && recruiter !== 'All Recruiters') {
+          query.assignedTo = recruiter;
+        }
+        
+        if (search) {
+          query.$and = query.$and || [];
+          query.$and.push({
+            $or: [
+              { candidateName: { $regex: search, $options: 'i' } },
+              { email: { $regex: search, $options: 'i' } },
+              { contactNumber: { $regex: search, $options: 'i' } },
+              { position: { $regex: search, $options: 'i' } }
+            ]
+          });
+        }
+        
+        return await recruitmentCol.find(query).toArray();
+      });
+      
+      const allCandidatesArrays = await Promise.all(allCandidatesPromises);
+      candidates = allCandidatesArrays.flat();
+    } else {
+      // Get HRMS database for specific company
+      const db = await getHrmsDb(company);
+      const recruitmentCol = db.collection('recruitment');
+      
+      // Build query - candidates with offer accepted or hired
+      const query = {
+        $or: [
+          { hiringStatus: 'Hired' },
+          { offerStatus: 'Accepted' },
+          { status: 'Hired' }
+        ]
+      };
+      
+      if (status && status !== 'All Status') {
+        if (status === 'Accepted') {
+          query.$or = [{ offerStatus: 'Accepted' }, { hiringStatus: 'Hired' }];
+        } else {
+          query.offerStatus = status;
+        }
+      }
+      
+      if (stage && stage !== 'All Stages') {
+        query.onboardingStage = stage;
+      }
+      
+      if (recruiter && recruiter !== 'All Recruiters') {
+        query.assignedTo = recruiter;
+      }
+      
+      if (search) {
+        query.$and = query.$and || [];
+        query.$and.push({
+          $or: [
+            { candidateName: { $regex: search, $options: 'i' } },
+            { email: { $regex: search, $options: 'i' } },
+            { contactNumber: { $regex: search, $options: 'i' } },
+            { position: { $regex: search, $options: 'i' } }
+          ]
+        });
+      }
+      
+      candidates = await recruitmentCol.find(query).toArray();
+    }
+    
+    // Transform candidates
+    const transformedCandidates = candidates.map((candidate, index) => {
+      const offerStatus = candidate.offerStatus || (candidate.hiringStatus === 'Hired' ? 'Accepted' : 'Sent');
+      const offerStatusColors = {
+        'Accepted': 'bg-green-100 text-green-700',
+        'Sent': 'bg-blue-100 text-blue-700',
+        'Pending': 'bg-yellow-100 text-yellow-700',
+        'Declined': 'bg-red-100 text-red-700'
+      };
+      
+      const onboardingStage = candidate.onboardingStage || 'Offer';
+      const onboardingStageColors = {
+        'Offer': 'bg-blue-100 text-blue-700',
+        'Form': 'bg-yellow-100 text-yellow-700',
+        'Verification': 'bg-orange-100 text-orange-700',
+        'Policy': 'bg-purple-100 text-purple-700',
+        'Asset': 'bg-green-100 text-green-700'
+      };
+      
+      const joiningDate = candidate.joiningDate ? new Date(candidate.joiningDate).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : 'N/A';
+      
+      // Calculate progress based on stage
+      const progressMap = {
+        'Offer': 0,
+        'Form': 15,
+        'Verification': 65,
+        'Policy': 15,
+        'Asset': 100
+      };
+      const progress = candidate.progress || progressMap[onboardingStage] || 0;
+      
+      return {
+        id: candidate._id?.toString() || index + 1,
+        name: candidate.candidateName || 'Unknown',
+        email: candidate.email || 'N/A',
+        contact: candidate.contactNumber || 'N/A',
+        position: candidate.position || candidate.jobTitle || 'N/A',
+        recruiter: candidate.assignedTo || 'Unassigned',
+        offerStatus: offerStatus,
+        offerStatusColor: offerStatusColors[offerStatus] || 'bg-slate-100 text-slate-700',
+        joiningDate: joiningDate,
+        onboardingStage: onboardingStage,
+        onboardingStageColor: onboardingStageColors[onboardingStage] || 'bg-slate-100 text-slate-700',
+        progress: progress
+      };
+    });
+    
+    // Calculate KPIs
+    const totalOnboardings = transformedCandidates.length;
+    const pendingOffers = transformedCandidates.filter(c => c.offerStatus === 'Sent' || c.offerStatus === 'Pending').length;
+    const offersAccepted = transformedCandidates.filter(c => c.offerStatus === 'Accepted').length;
+    const offersDeclined = transformedCandidates.filter(c => c.offerStatus === 'Declined').length;
+    const completedOnboardings = transformedCandidates.filter(c => c.onboardingStage === 'Asset' && c.progress === 100).length;
+    
+    // Get HR list - aggregate from all companies for admin portal
+    const { getUsersCollection } = require('../../config/mongo');
+    let hrList = [];
+    const hrSet = new Set();
+    
+    try {
+      if (!company || company === 'all' || company === 'undefined') {
+        // Get HRs from all companies
+        const companyNames = ['Ecosoul Home', 'Thrive'];
+        for (const companyName of companyNames) {
+          try {
+            const usersCol = await getUsersCollection(null, companyName);
+            const employees = await usersCol.find({ role: { $in: ['hr', 'HR', 'recruiter', 'Recruiter'] } }).toArray();
+            employees.forEach(emp => {
+              const name = emp.name || emp.firstName;
+              if (name && name !== 'Unknown') {
+                hrSet.add(name);
+              }
+            });
+          } catch (err) {
+            // Continue to next company
+          }
+        }
+        hrList = Array.from(hrSet);
+      } else {
+        // Get HRs from specific company
+        const usersCol = await getUsersCollection(null, company);
+        const employees = await usersCol.find({ role: { $in: ['hr', 'HR', 'recruiter', 'Recruiter'] } }).toArray();
+        hrList = employees.map(emp => emp.name || emp.firstName || 'Unknown').filter(Boolean);
+      }
+    } catch (err) {
+      console.error('Error fetching HR list:', err);
+    }
+    
+    res.json({
+      success: true,
+      data: {
+        candidates: transformedCandidates,
+        kpis: {
+          totalOnboardings,
+          pendingOffers,
+          offersAccepted,
+          offersDeclined,
+          completedOnboardings
+        },
+        hrList: ['All Recruiters', ...hrList]
+      }
+    });
+  } catch (error) {
+    console.error('HRMS recruitment onboarding error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Internal server error'
+    });
+  }
+});
+
+// Get single recruitment candidate by ID
+router.get('/recruitment/candidates/:id', async (req, res) => {
+  try {
+    await connectMongo();
+    const company = getCompanyFromRequest(req);
+    const candidateId = req.params.id;
+    
+    if (!candidateId) {
+      return res.status(400).json({
+        success: false,
+        error: 'Candidate ID is required'
+      });
+    }
+    
+    const { ObjectId } = require('mongodb');
+    
+    // Validate ObjectId format
+    if (!ObjectId.isValid(candidateId)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid candidate ID format'
+      });
+    }
+    
+    let candidate = null;
+    
+    // If company is not specified, search across all databases
+    if (!company || company === 'all' || company === 'undefined') {
+      const dbs = await getAllHrmsDbs();
+      for (const db of dbs) {
+        const recruitmentCol = db.collection('recruitment');
+        candidate = await recruitmentCol.findOne({ _id: new ObjectId(candidateId) });
+        if (candidate) {
+          break; // Found, exit loop
+        }
+      }
+    } else {
+      // Get HRMS database for specific company
+      const db = await getHrmsDb(company);
+      const recruitmentCol = db.collection('recruitment');
+      candidate = await recruitmentCol.findOne({ _id: new ObjectId(candidateId) });
+    }
+    
+    if (!candidate) {
+      return res.status(404).json({
+        success: false,
+        error: 'Candidate not found'
+      });
+    }
+    
+    // Format dates for frontend
+    const formatDate = (date) => {
+      if (!date) return null;
+      const d = new Date(date);
+      return d.toISOString().split('T')[0];
+    };
+    
+    // Return all candidate fields
+    res.json({
+      success: true,
+      data: {
+        id: candidate._id?.toString(),
+        candidateName: candidate.candidateName || '',
+        contactNumber: candidate.contactNumber || '',
+        email: candidate.email || '',
+        currentLocation: candidate.currentLocation || '',
+        callingDate: formatDate(candidate.callingDate),
+        assignDate: formatDate(candidate.assignDate),
+        currentOrganisation: candidate.currentOrganisation || '',
+        education: candidate.education || '',
+        totalExperience: candidate.totalExperience || '',
+        assignedTo: candidate.assignedTo || '',
+        status: candidate.status || 'New',
+        currentCTCFixed: candidate.currentCTCFixed || 0,
+        currentCTCInHand: candidate.currentCTCInHand || 0,
+        expectedCTC: candidate.expectedCTC || 0,
+        noticePeriod: candidate.noticePeriod || '',
+        willingToWorkInStartup: candidate.willingToWorkInStartup || 'Yes',
+        communicationSkills: candidate.communicationSkills || '',
+        recruiterFeedback: candidate.recruiterFeedback || '',
+        interviewerFeedback: candidate.interviewerFeedback || '',
+        remark: candidate.remark || '',
+        company: candidate.company || null,
+        createdAt: candidate.createdAt,
+        updatedAt: candidate.updatedAt
+      }
+    });
+  } catch (error) {
+    console.error('HRMS get candidate by ID error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Internal server error'
+    });
+  }
+});
+
+// Create/Add new recruitment candidate
+router.post('/recruitment/candidates', async (req, res) => {
+  try {
+    await connectMongo();
+    const company = getCompanyFromRequest(req);
+    const candidateData = req.body;
+    
+    // Get HRMS database - use default if no company specified (for admin portal)
+    const db = await getHrmsDb(company || null);
+    const recruitmentCol = db.collection('recruitment');
+    
+    // Prepare candidate document
+    const candidate = {
+      candidateName: candidateData.candidateName || '',
+      contactNumber: candidateData.contactNumber || '',
+      email: candidateData.email || '',
+      currentLocation: candidateData.currentLocation || '',
+      callingDate: candidateData.callingDate ? new Date(candidateData.callingDate) : new Date(),
+      assignDate: candidateData.assignDate ? new Date(candidateData.assignDate) : new Date(),
+      currentOrganisation: candidateData.currentOrganisation || '',
+      education: candidateData.education || '',
+      totalExperience: candidateData.totalExperience || '',
+      assignedTo: candidateData.assignedTo || '',
+      status: candidateData.status || 'New',
+      currentCTCFixed: candidateData.currentCTCFixed || 0,
+      currentCTCInHand: candidateData.currentCTCInHand || 0,
+      expectedCTC: candidateData.expectedCTC || 0,
+      noticePeriod: candidateData.noticePeriod || '',
+      willingToWorkInStartup: candidateData.willingToWorkInStartup || 'Yes',
+      communicationSkills: candidateData.communicationSkills || '',
+      recruiterFeedback: candidateData.recruiterFeedback || '',
+      interviewerFeedback: candidateData.interviewerFeedback || '',
+      remark: candidateData.remark || '',
+      folderName: candidateData.folderName || '',
+      company: candidateData.company || company || null,
+      createdAt: new Date(),
+      updatedAt: new Date()
+    };
+    
+    // Insert candidate
+    const result = await recruitmentCol.insertOne(candidate);
+    
+    res.json({
+      success: true,
+      message: 'Candidate added successfully',
+      data: {
+        id: result.insertedId.toString(),
+        ...candidate
+      }
+    });
+  } catch (error) {
+    console.error('HRMS add candidate error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Internal server error'
+    });
+  }
+});
+
+// Bulk upload recruitment candidates
+router.post('/recruitment/candidates/bulk-upload', async (req, res) => {
+  try {
+    await connectMongo();
+    const company = getCompanyFromRequest(req);
+    const { candidates, company: candidateCompany } = req.body;
+    
+    if (!candidates || !Array.isArray(candidates) || candidates.length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'No candidates provided'
+      });
+    }
+
+    // Get HRMS database - use default if no company specified (for admin portal)
+    const db = await getHrmsDb(company || candidateCompany || null);
+    const recruitmentCol = db.collection('recruitment');
+    
+    const insertedCandidates = [];
+    const errors = [];
+    
+    // Process each candidate
+    for (let i = 0; i < candidates.length; i++) {
+      const candidateData = candidates[i];
+      
+      try {
+        // Prepare candidate document
+        const candidate = {
+          candidateName: candidateData.candidateName || '',
+          contactNumber: candidateData.contactNumber || '',
+          email: candidateData.email || '',
+          currentLocation: candidateData.currentLocation || '',
+          callingDate: candidateData.callingDate ? new Date(candidateData.callingDate) : new Date(),
+          assignDate: candidateData.assignDate ? new Date(candidateData.assignDate) : new Date(),
+          currentOrganisation: candidateData.currentOrganisation || '',
+          education: candidateData.education || '',
+          totalExperience: candidateData.totalExperience || '',
+          assignedTo: candidateData.assignedTo || '',
+          status: candidateData.status || 'New',
+          currentCTCFixed: parseFloat(candidateData.currentCTCFixed) || 0,
+          currentCTCInHand: parseFloat(candidateData.currentCTCInHand) || 0,
+          expectedCTC: parseFloat(candidateData.expectedCTC) || 0,
+          noticePeriod: candidateData.noticePeriod || '',
+          willingToWorkInStartup: candidateData.willingToWorkInStartup || 'Yes',
+          communicationSkills: candidateData.communicationSkills || '',
+          recruiterFeedback: candidateData.recruiterFeedback || '',
+          interviewerFeedback: candidateData.interviewerFeedback || '',
+          remark: candidateData.remark || '',
+          folderName: candidateData.folderName || '',
+          company: candidateData.company || company || candidateCompany || null,
+          createdAt: new Date(),
+          updatedAt: new Date()
+        };
+        
+        // Insert candidate
+        const result = await recruitmentCol.insertOne(candidate);
+        insertedCandidates.push({
+          id: result.insertedId.toString(),
+          ...candidate
+        });
+      } catch (error) {
+        console.error(`Error inserting candidate ${i + 1}:`, error);
+        errors.push({
+          row: i + 2, // +2 because header is row 1 and index is 0-based
+          errors: [error.message || 'Failed to insert candidate']
+        });
+      }
+    }
+    
+    res.json({
+      success: true,
+      message: `Successfully imported ${insertedCandidates.length} candidate(s)${errors.length > 0 ? `. ${errors.length} candidate(s) had errors.` : ''}`,
+      data: {
+        created: insertedCandidates.length,
+        candidates: insertedCandidates,
+        errors: errors.length > 0 ? errors : undefined
+      }
+    });
+  } catch (error) {
+    console.error('HRMS bulk upload candidates error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Internal server error'
+    });
+  }
+});
+
+// Update recruitment candidate
+router.put('/recruitment/candidates/:id', async (req, res) => {
+  try {
+    await connectMongo();
+    const company = getCompanyFromRequest(req);
+    const candidateId = req.params.id;
+    const candidateData = req.body;
+    
+    if (!candidateId) {
+      return res.status(400).json({
+        success: false,
+        error: 'Candidate ID is required'
+      });
+    }
+    
+    const { ObjectId } = require('mongodb');
+    
+    // Validate ObjectId format
+    if (!ObjectId.isValid(candidateId)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid candidate ID format'
+      });
+    }
+    
+    // Prepare update document
+    const updateData = {
+      ...candidateData,
+      updatedAt: new Date()
+    };
+    
+    // Convert date strings to Date objects if present
+    if (updateData.callingDate && typeof updateData.callingDate === 'string') {
+      updateData.callingDate = new Date(updateData.callingDate);
+    }
+    if (updateData.assignDate && typeof updateData.assignDate === 'string') {
+      updateData.assignDate = new Date(updateData.assignDate);
+    }
+    if (updateData.joiningDate && typeof updateData.joiningDate === 'string') {
+      updateData.joiningDate = new Date(updateData.joiningDate);
+    }
+    if (updateData.interviewDate && typeof updateData.interviewDate === 'string') {
+      updateData.interviewDate = new Date(updateData.interviewDate);
+    }
+    if (updateData.interviewScheduledAt && typeof updateData.interviewScheduledAt === 'string') {
+      updateData.interviewScheduledAt = new Date(updateData.interviewScheduledAt);
+    }
+    
+    // If company is not specified, search across all databases
+    let result = null;
+    if (!company || company === 'all' || company === 'undefined') {
+      const dbs = await getAllHrmsDbs();
+      for (const db of dbs) {
+        const recruitmentCol = db.collection('recruitment');
+        result = await recruitmentCol.updateOne(
+          { _id: new ObjectId(candidateId) },
+          { $set: updateData }
+        );
+        if (result.matchedCount > 0) {
+          break; // Found and updated, exit loop
+        }
+      }
+    } else {
+      // Get HRMS database for specific company
+      const db = await getHrmsDb(company);
+      const recruitmentCol = db.collection('recruitment');
+      result = await recruitmentCol.updateOne(
+        { _id: new ObjectId(candidateId) },
+        { $set: updateData }
+      );
+    }
+    
+    if (!result || result.matchedCount === 0) {
+      return res.status(404).json({
+        success: false,
+        error: 'Candidate not found'
+      });
+    }
+    
+    // Fetch the updated candidate to return all fields
+    let updatedCandidate = null;
+    if (!company || company === 'all' || company === 'undefined') {
+      const dbs = await getAllHrmsDbs();
+      for (const db of dbs) {
+        const recruitmentCol = db.collection('recruitment');
+        updatedCandidate = await recruitmentCol.findOne({ _id: new ObjectId(candidateId) });
+        if (updatedCandidate) {
+          break;
+        }
+      }
+    } else {
+      const db = await getHrmsDb(company);
+      const recruitmentCol = db.collection('recruitment');
+      updatedCandidate = await recruitmentCol.findOne({ _id: new ObjectId(candidateId) });
+    }
+    
+    // Format dates for frontend
+    const formatDate = (date) => {
+      if (!date) return null;
+      const d = new Date(date);
+      return d.toISOString().split('T')[0];
+    };
+    
+    // Return all candidate fields
+    res.json({
+      success: true,
+      message: 'Candidate updated successfully',
+      data: {
+        id: updatedCandidate._id?.toString(),
+        candidateName: updatedCandidate.candidateName || '',
+        contactNumber: updatedCandidate.contactNumber || '',
+        email: updatedCandidate.email || '',
+        currentLocation: updatedCandidate.currentLocation || '',
+        callingDate: formatDate(updatedCandidate.callingDate),
+        assignDate: formatDate(updatedCandidate.assignDate),
+        currentOrganisation: updatedCandidate.currentOrganisation || '',
+        education: updatedCandidate.education || '',
+        totalExperience: updatedCandidate.totalExperience || '',
+        assignedTo: updatedCandidate.assignedTo || '',
+        status: updatedCandidate.status || 'New',
+        currentCTCFixed: updatedCandidate.currentCTCFixed || 0,
+        currentCTCInHand: updatedCandidate.currentCTCInHand || 0,
+        expectedCTC: updatedCandidate.expectedCTC || 0,
+        noticePeriod: updatedCandidate.noticePeriod || '',
+        willingToWorkInStartup: updatedCandidate.willingToWorkInStartup || 'Yes',
+        communicationSkills: updatedCandidate.communicationSkills || '',
+        recruiterFeedback: updatedCandidate.recruiterFeedback || '',
+        interviewerFeedback: updatedCandidate.interviewerFeedback || '',
+        remark: updatedCandidate.remark || '',
+        company: updatedCandidate.company || null,
+        createdAt: updatedCandidate.createdAt,
+        updatedAt: updatedCandidate.updatedAt
+      }
+    });
+  } catch (error) {
+    console.error('HRMS update candidate error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Internal server error'
+    });
+  }
+});
+
+// Delete recruitment candidate
+router.delete('/recruitment/candidates/:id', async (req, res) => {
+  try {
+    await connectMongo();
+    const company = getCompanyFromRequest(req);
+    const candidateId = req.params.id;
+    
+    const { ObjectId } = require('mongodb');
+    
+    // Validate ObjectId format
+    if (!ObjectId.isValid(candidateId)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid candidate ID format'
+      });
+    }
+    
+    // If company is not specified, search across all databases
+    let result = null;
+    if (!company || company === 'all' || company === 'undefined') {
+      const dbs = await getAllHrmsDbs();
+      for (const db of dbs) {
+        const recruitmentCol = db.collection('recruitment');
+        result = await recruitmentCol.deleteOne({ _id: new ObjectId(candidateId) });
+        if (result.deletedCount > 0) {
+          break; // Found and deleted, exit loop
+        }
+      }
+    } else {
+      // Get HRMS database for specific company
+      const db = await getHrmsDb(company);
+      const recruitmentCol = db.collection('recruitment');
+      result = await recruitmentCol.deleteOne({ _id: new ObjectId(candidateId) });
+    }
+    
+    if (!result || result.deletedCount === 0) {
+      return res.status(404).json({
+        success: false,
+        error: 'Candidate not found'
+      });
+    }
+    
+    res.json({
+      success: true,
+      message: 'Candidate deleted successfully'
+    });
+  } catch (error) {
+    console.error('HRMS delete candidate error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Internal server error'
+    });
+  }
+});
+
+// Get all recruiters/HR
+router.get('/recruitment/recruiters', async (req, res) => {
+  try {
+    await connectMongo();
+    const company = getCompanyFromRequest(req);
+    
+    const { getUsersCollection } = require('../../config/mongo');
+    let recruiters = [];
+    const recruiterMap = new Map(); // Use Map to avoid duplicates
+    
+    try {
+      if (!company || company === 'all' || company === 'undefined') {
+        // Get recruiters from all companies for admin portal
+        const companyNames = ['Ecosoul Home', 'Thrive'];
+        for (const companyName of companyNames) {
+          try {
+            const usersCol = await getUsersCollection(null, companyName);
+            const employees = await usersCol.find({ role: { $in: ['hr', 'HR', 'recruiter', 'Recruiter'] } }).toArray();
+            employees.forEach(emp => {
+              const name = emp.name || emp.firstName;
+              if (name && name !== 'Unknown') {
+                // Use email as key to avoid duplicates
+                const key = emp.email || name;
+                if (!recruiterMap.has(key)) {
+                  recruiterMap.set(key, {
+                    id: emp._id?.toString(),
+                    name: name,
+                    email: emp.email || '',
+                    role: emp.role || 'recruiter',
+                    phone: emp.phone || emp.mobile || ''
+                  });
+                }
+              }
+            });
+          } catch (err) {
+            // Continue to next company
+          }
+        }
+        recruiters = Array.from(recruiterMap.values());
+      } else {
+        // Get recruiters from specific company
+        const usersCol = await getUsersCollection(null, company);
+        const employees = await usersCol.find({ role: { $in: ['hr', 'HR', 'recruiter', 'Recruiter'] } }).toArray();
+        recruiters = employees.map(emp => ({
+          id: emp._id?.toString(),
+          name: emp.name || emp.firstName || 'Unknown',
+          email: emp.email || '',
+          role: emp.role || 'recruiter',
+          phone: emp.phone || emp.mobile || ''
+        })).filter(emp => emp.name !== 'Unknown');
+      }
+    } catch (err) {
+      console.error('Error fetching recruiters:', err);
+    }
+    
+    res.json({
+      success: true,
+      data: recruiters
+    });
+  } catch (error) {
+    console.error('HRMS get recruiters error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Internal server error'
+    });
+  }
+});
+
+// Add new recruiter
+router.post('/recruitment/recruiters', async (req, res) => {
+  try {
+    await connectMongo();
+    const company = getCompanyFromRequest(req);
+    const { name, email, phone, role } = req.body;
+    
+    if (!name || !email) {
+      return res.status(400).json({
+        success: false,
+        error: 'Name and email are required'
+      });
+    }
+    
+    const { getUsersCollection } = require('../../config/mongo');
+    let companyName = company;
+    if (!companyName || companyName === '1' || companyName === 'undefined') {
+      companyName = 'Ecosoul Home';
+    }
+    
+    const usersCol = await getUsersCollection(null, companyName);
+    
+    // Check if email already exists
+    const existing = await usersCol.findOne({ email: email.toLowerCase() });
+    if (existing) {
+      return res.status(400).json({
+        success: false,
+        error: 'Recruiter with this email already exists'
+      });
+    }
+    
+    // Create new recruiter
+    const recruiter = {
+      name: name,
+      firstName: name.split(' ')[0] || name,
+      lastName: name.split(' ').slice(1).join(' ') || '',
+      email: email.toLowerCase(),
+      phone: phone || '',
+      role: role || 'recruiter',
+      status: 'active',
+      createdAt: new Date(),
+      updatedAt: new Date()
+    };
+    
+    const result = await usersCol.insertOne(recruiter);
+    
+    res.json({
+      success: true,
+      message: 'Recruiter added successfully',
+      data: {
+        id: result.insertedId.toString(),
+        ...recruiter
+      }
+    });
+  } catch (error) {
+    console.error('HRMS add recruiter error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Internal server error'
+    });
+  }
+});
+
+// Update recruiter
+router.put('/recruitment/recruiters/:id', async (req, res) => {
+  try {
+    await connectMongo();
+    const company = getCompanyFromRequest(req);
+    const recruiterId = req.params.id;
+    const { name, email, phone, role } = req.body;
+    
+    if (!recruiterId) {
+      return res.status(400).json({
+        success: false,
+        error: 'Recruiter ID is required'
+      });
+    }
+    
+    const { getUsersCollection } = require('../../config/mongo');
+    const { ObjectId } = require('mongodb');
+    
+    let companyName = company;
+    if (!companyName || companyName === '1' || companyName === 'undefined') {
+      companyName = 'Ecosoul Home';
+    }
+    
+    const usersCol = await getUsersCollection(null, companyName);
+    
+    // Validate ObjectId
+    if (!ObjectId.isValid(recruiterId)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid recruiter ID format'
+      });
+    }
+    
+    // Check if email is being changed and if it already exists
+    if (email) {
+      const existing = await usersCol.findOne({ 
+        email: email.toLowerCase(),
+        _id: { $ne: new ObjectId(recruiterId) }
+      });
+      if (existing) {
+        return res.status(400).json({
+          success: false,
+          error: 'Recruiter with this email already exists'
+        });
+      }
+    }
+    
+    // Prepare update data
+    const updateData = {
+      updatedAt: new Date()
+    };
+    
+    if (name) {
+      updateData.name = name;
+      updateData.firstName = name.split(' ')[0] || name;
+      updateData.lastName = name.split(' ').slice(1).join(' ') || '';
+    }
+    if (email) {
+      updateData.email = email.toLowerCase();
+    }
+    if (phone !== undefined) {
+      updateData.phone = phone;
+    }
+    if (role) {
+      updateData.role = role;
+    }
+    
+    // Update recruiter
+    const result = await usersCol.updateOne(
+      { _id: new ObjectId(recruiterId) },
+      { $set: updateData }
+    );
+    
+    if (result.matchedCount === 0) {
+      return res.status(404).json({
+        success: false,
+        error: 'Recruiter not found'
+      });
+    }
+    
+    res.json({
+      success: true,
+      message: 'Recruiter updated successfully'
+    });
+  } catch (error) {
+    console.error('HRMS update recruiter error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Internal server error'
+    });
+  }
+});
+
+// Delete recruiter
+router.delete('/recruitment/recruiters/:id', async (req, res) => {
+  try {
+    await connectMongo();
+    const company = getCompanyFromRequest(req);
+    const recruiterId = req.params.id;
+    
+    if (!recruiterId) {
+      return res.status(400).json({
+        success: false,
+        error: 'Recruiter ID is required'
+      });
+    }
+    
+    const { getUsersCollection } = require('../../config/mongo');
+    const { ObjectId } = require('mongodb');
+    
+    let companyName = company;
+    if (!companyName || companyName === '1' || companyName === 'undefined') {
+      companyName = 'Ecosoul Home';
+    }
+    
+    const usersCol = await getUsersCollection(null, companyName);
+    
+    // Validate ObjectId
+    if (!ObjectId.isValid(recruiterId)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid recruiter ID format'
+      });
+    }
+    
+    // Check if recruiter is assigned to any candidates
+    const db = await getHrmsDb(company);
+    const recruitmentCol = db.collection('recruitment');
+    const recruiter = await usersCol.findOne({ _id: new ObjectId(recruiterId) });
+    
+    if (recruiter) {
+      const recruiterName = recruiter.name || recruiter.firstName || '';
+      const assignedCandidates = await recruitmentCol.countDocuments({ assignedTo: recruiterName });
+      
+      if (assignedCandidates > 0) {
+        return res.status(400).json({
+          success: false,
+          error: `Cannot delete recruiter. ${assignedCandidates} candidate(s) are assigned to this recruiter. Please reassign them first.`
+        });
+      }
+    }
+    
+    // Delete recruiter
+    const result = await usersCol.deleteOne({ _id: new ObjectId(recruiterId) });
+    
+    if (result.deletedCount === 0) {
+      return res.status(404).json({
+        success: false,
+        error: 'Recruiter not found'
+      });
+    }
+    
+    res.json({
+      success: true,
+      message: 'Recruiter deleted successfully'
+    });
+  } catch (error) {
+    console.error('HRMS delete recruiter error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Internal server error'
+    });
+  }
+});
+
+// Get all scheduled interviews
+router.get('/recruitment/interviews', async (req, res) => {
+  try {
+    await connectMongo();
+    const company = getCompanyFromRequest(req);
+    const { status, interviewer, date, search } = req.query;
+    
+    // For HRMS Admin Portal - get data from all companies if no company specified
+    let candidates = [];
+    
+    if (!company || company === 'all' || company === 'undefined') {
+      // Get all databases and aggregate data
+      const dbs = await getAllHrmsDbs();
+      const allCandidatesPromises = dbs.map(async (db) => {
+        const recruitmentCol = db.collection('recruitment');
+        
+        // Build query - only candidates with scheduled interviews
+        const query = {
+          $or: [
+            { status: 'Interview Scheduled' },
+            { interviewDate: { $exists: true, $ne: null } },
+            { interviewScheduledAt: { $exists: true, $ne: null } }
+          ]
+        };
+        
+        // Filter by status
+        if (status && status !== 'All Status') {
+          query.status = status;
+        }
+        
+        // Filter by interviewer
+        if (interviewer && interviewer !== 'All Interviewers') {
+          query.interviewer = interviewer;
+        }
+        
+        // Filter by date
+        if (date) {
+          const startDate = new Date(date);
+          startDate.setHours(0, 0, 0, 0);
+          const endDate = new Date(date);
+          endDate.setHours(23, 59, 59, 999);
+          
+          // Add date filter to existing query
+          const dateQuery = {
+            $or: [
+              { interviewDate: { $gte: startDate, $lte: endDate } },
+              { interviewScheduledAt: { $gte: startDate, $lte: endDate } }
+            ]
+          };
+          
+          if (query.$and) {
+            query.$and.push(dateQuery);
+          } else {
+            query.$and = [dateQuery];
+          }
+        }
+        
+        // Search filter
+        if (search) {
+          query.$and = query.$and || [];
+          query.$and.push({
+            $or: [
+              { candidateName: { $regex: search, $options: 'i' } },
+              { email: { $regex: search, $options: 'i' } },
+              { contactNumber: { $regex: search, $options: 'i' } },
+              { interviewer: { $regex: search, $options: 'i' } }
+            ]
+          });
+        }
+        
+        return await recruitmentCol.find(query).toArray();
+      });
+      
+      const allCandidatesArrays = await Promise.all(allCandidatesPromises);
+      candidates = allCandidatesArrays.flat();
+    } else {
+      // Get HRMS database for specific company
+      const db = await getHrmsDb(company);
+      const recruitmentCol = db.collection('recruitment');
+      
+      // Build query - only candidates with scheduled interviews
+      const query = {
+        $or: [
+          { status: 'Interview Scheduled' },
+          { interviewDate: { $exists: true, $ne: null } },
+          { interviewScheduledAt: { $exists: true, $ne: null } }
+        ]
+      };
+      
+      // Filter by status
+      if (status && status !== 'All Status') {
+        query.status = status;
+      }
+      
+      // Filter by interviewer
+      if (interviewer && interviewer !== 'All Interviewers') {
+        query.interviewer = interviewer;
+      }
+      
+      // Filter by date
+      if (date) {
+        const startDate = new Date(date);
+        startDate.setHours(0, 0, 0, 0);
+        const endDate = new Date(date);
+        endDate.setHours(23, 59, 59, 999);
+        
+        // Add date filter to existing query
+        const dateQuery = {
+          $or: [
+            { interviewDate: { $gte: startDate, $lte: endDate } },
+            { interviewScheduledAt: { $gte: startDate, $lte: endDate } }
+          ]
+        };
+        
+        if (query.$and) {
+          query.$and.push(dateQuery);
+        } else {
+          query.$and = [dateQuery];
+        }
+      }
+      
+      // Search filter
+      if (search) {
+        query.$and = query.$and || [];
+        query.$and.push({
+          $or: [
+            { candidateName: { $regex: search, $options: 'i' } },
+            { email: { $regex: search, $options: 'i' } },
+            { contactNumber: { $regex: search, $options: 'i' } },
+            { interviewer: { $regex: search, $options: 'i' } }
+          ]
+        });
+      }
+      
+      candidates = await recruitmentCol.find(query).toArray();
+    }
+    
+    // Transform to interview format
+    const interviews = candidates
+      .filter(candidate => candidate.interviewDate || candidate.interviewScheduledAt)
+      .map((candidate, index) => {
+        const interviewDate = candidate.interviewDate || candidate.interviewScheduledAt;
+        const interviewTime = candidate.interviewTime || '';
+        const scheduledDateTime = interviewDate ? new Date(interviewDate) : null;
+        
+        // Determine interview status
+        let interviewStatus = 'Scheduled';
+        if (scheduledDateTime) {
+          const now = new Date();
+          if (scheduledDateTime < now) {
+            interviewStatus = 'Completed';
+          } else if (scheduledDateTime.getTime() - now.getTime() < 24 * 60 * 60 * 1000) {
+            interviewStatus = 'Upcoming';
+          }
+        }
+        
+        return {
+          id: candidate._id?.toString() || index + 1,
+          candidateId: candidate._id?.toString(),
+          candidateName: candidate.candidateName || 'Unknown',
+          email: candidate.email || 'N/A',
+          contact: candidate.contactNumber || 'N/A',
+          position: candidate.position || candidate.jobTitle || 'N/A',
+          interviewer: candidate.interviewer || 'N/A',
+          interviewDate: candidate.interviewDate || candidate.interviewScheduledAt,
+          interviewTime: candidate.interviewTime || 'N/A',
+          meetingLink: candidate.meetingLink || 'N/A',
+          status: candidate.status || 'Interview Scheduled',
+          interviewStatus: interviewStatus,
+          scheduledAt: candidate.interviewScheduledAt || candidate.interviewDate,
+          assignedTo: candidate.assignedTo || 'Unassigned'
+        };
+      })
+      .sort((a, b) => {
+        // Sort by scheduled date/time
+        const dateA = a.scheduledAt ? new Date(a.scheduledAt).getTime() : 0;
+        const dateB = b.scheduledAt ? new Date(b.scheduledAt).getTime() : 0;
+        return dateB - dateA; // Most recent first
+      });
+    
+    // Get unique interviewers for filter
+    const interviewers = [...new Set(interviews.map(i => i.interviewer).filter(Boolean))];
+    
+    res.json({
+      success: true,
+      data: {
+        interviews: interviews,
+        interviewers: ['All Interviewers', ...interviewers]
+      }
+    });
+  } catch (error) {
+    console.error('HRMS get interviews error:', error);
     res.status(500).json({
       success: false,
       error: 'Internal server error'
