@@ -571,28 +571,34 @@ router.put('/:id', async (req, res) => {
     // Basic fields
     if (name !== undefined) updateData.name = name.trim();
     if (email !== undefined) {
+      const normalizedEmail = email.toLowerCase().trim();
+      const existingEmail = (existingUser.email || '').toLowerCase().trim();
+
       // Validate email format
       const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-      if (!emailRegex.test(email)) {
+      if (!emailRegex.test(normalizedEmail)) {
         return res.status(400).json({
           success: false,
           error: 'Invalid email format'
         });
       }
 
-      // Check if email is already taken by another user
-      const emailUser = await usersCol.findOne({ 
-        email: email.toLowerCase().trim(),
-        _id: { $ne: new ObjectId(id) }
-      });
-      if (emailUser) {
-        return res.status(400).json({
-          success: false,
-          error: 'Email already taken by another user'
+      // Only run duplicate check if email is actually changed.
+      // This avoids blocking password-only updates for the same user.
+      if (normalizedEmail !== existingEmail) {
+        const emailUser = await usersCol.findOne({ 
+          email: normalizedEmail,
+          _id: { $ne: new ObjectId(id) }
         });
+        if (emailUser) {
+          return res.status(400).json({
+            success: false,
+            error: 'Email already taken by another user'
+          });
+        }
       }
 
-      updateData.email = email.toLowerCase().trim();
+      updateData.email = normalizedEmail;
     }
     if (password !== undefined && password !== '') {
       // Validate password length

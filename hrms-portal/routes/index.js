@@ -2030,37 +2030,40 @@ router.get('/recruitment/candidates', async (req, res) => {
     }
     
     // Transform candidates to match frontend format
-    const transformedCandidates = filteredCandidates.map((candidate, index) => {
-      const statusColors = {
-        'New': 'bg-blue-100 text-blue-700',
-        'Shortlisted': 'bg-purple-100 text-purple-700',
-        'In Interview': 'bg-yellow-100 text-yellow-700',
-        'Interview Scheduled': 'bg-yellow-100 text-yellow-700',
-        'Interview Aligned': 'bg-yellow-100 text-yellow-700',
-        'Feedback Call': 'bg-orange-100 text-orange-700',
-        'Finalized': 'bg-indigo-100 text-indigo-700',
-        'Hired': 'bg-green-100 text-green-700',
-        'On Hold': 'bg-slate-100 text-slate-700',
-      };
-      
-      const status = candidate.status || 'New';
-      const assignDate = candidate.assignDate ? new Date(candidate.assignDate).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : 'N/A';
-      
-      return {
-        id: candidate._id?.toString() || index + 1,
-        name: candidate.candidateName || 'Unknown',
-        contact: candidate.contactNumber || 'N/A',
-        email: candidate.email || 'N/A',
-        organisation: candidate.currentOrganisation || 'N/A',
-        education: candidate.education || 'N/A',
-        experience: candidate.totalExperience || 'N/A',
-        assignedTo: candidate.assignedTo || 'Unassigned',
-        assignDate: assignDate,
-        status: status,
-        statusColor: statusColors[status] || 'bg-slate-100 text-slate-700',
-        folderName: candidate.folderName || 'N/A'
-      };
-    });
+    // Filter out candidates without valid _id (they're not properly saved)
+    const transformedCandidates = filteredCandidates
+      .filter(candidate => candidate._id) // Only include candidates with valid _id
+      .map((candidate) => {
+        const statusColors = {
+          'New': 'bg-blue-100 text-blue-700',
+          'Shortlisted': 'bg-purple-100 text-purple-700',
+          'In Interview': 'bg-yellow-100 text-yellow-700',
+          'Interview Scheduled': 'bg-yellow-100 text-yellow-700',
+          'Interview Aligned': 'bg-yellow-100 text-yellow-700',
+          'Feedback Call': 'bg-orange-100 text-orange-700',
+          'Finalized': 'bg-indigo-100 text-indigo-700',
+          'Hired': 'bg-green-100 text-green-700',
+          'On Hold': 'bg-slate-100 text-slate-700',
+        };
+        
+        const status = candidate.status || 'New';
+        const assignDate = candidate.assignDate ? new Date(candidate.assignDate).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : 'N/A';
+        
+        return {
+          id: candidate._id.toString(), // Always use _id.toString() - no fallback
+          name: candidate.candidateName || 'Unknown',
+          contact: candidate.contactNumber || 'N/A',
+          email: candidate.email || 'N/A',
+          organisation: candidate.currentOrganisation || 'N/A',
+          education: candidate.education || 'N/A',
+          experience: candidate.totalExperience || 'N/A',
+          assignedTo: candidate.assignedTo || 'Unassigned',
+          assignDate: assignDate,
+          status: status,
+          statusColor: statusColors[status] || 'bg-slate-100 text-slate-700',
+          folderName: candidate.folderName || 'N/A'
+        };
+      });
     
     // Calculate KPIs
     const totalCandidates = transformedCandidates.length;
@@ -2227,29 +2230,31 @@ router.get('/recruitment/hiring', async (req, res) => {
       candidates = await recruitmentCol.find(query).toArray();
     }
     
-    // Transform candidates
-    const transformedCandidates = candidates.map((candidate, index) => {
-      const hiringStatus = candidate.hiringStatus || 'Awaiting';
-      const hiringStatusColors = {
-        'Hired': 'bg-green-100 text-green-700',
-        'Rejected': 'bg-red-100 text-red-700',
-        'Awaiting': 'bg-orange-100 text-orange-700'
-      };
-      
-      return {
-        id: candidate._id?.toString() || index + 1,
-        name: candidate.candidateName || 'Unknown',
-        email: candidate.email || 'N/A',
-        contact: candidate.contactNumber || 'N/A',
-        organisation: candidate.currentOrganisation || 'N/A',
-        assignedTo: candidate.assignedTo || 'Unassigned',
-        interviewStatus: 'Finalized',
-        interviewStatusColor: 'bg-green-100 text-green-700',
-        hiringStatus: hiringStatus,
-        hiringStatusColor: hiringStatusColors[hiringStatus] || 'bg-orange-100 text-orange-700',
-        activeAction: hiringStatus.toLowerCase()
-      };
-    });
+    // Transform candidates - filter out candidates without valid _id
+    const transformedCandidates = candidates
+      .filter(candidate => candidate._id) // Only include candidates with valid _id
+      .map((candidate) => {
+        const hiringStatus = candidate.hiringStatus || 'Awaiting';
+        const hiringStatusColors = {
+          'Hired': 'bg-green-100 text-green-700',
+          'Rejected': 'bg-red-100 text-red-700',
+          'Awaiting': 'bg-orange-100 text-orange-700'
+        };
+        
+        return {
+          id: candidate._id.toString(), // Always use _id.toString() - no fallback
+          name: candidate.candidateName || 'Unknown',
+          email: candidate.email || 'N/A',
+          contact: candidate.contactNumber || 'N/A',
+          organisation: candidate.currentOrganisation || 'N/A',
+          assignedTo: candidate.assignedTo || 'Unassigned',
+          interviewStatus: 'Finalized',
+          interviewStatusColor: 'bg-green-100 text-green-700',
+          hiringStatus: hiringStatus,
+          hiringStatusColor: hiringStatusColors[hiringStatus] || 'bg-orange-100 text-orange-700',
+          activeAction: hiringStatus.toLowerCase()
+        };
+      });
     
     // Calculate KPIs
     const totalCandidates = transformedCandidates.length;
@@ -2416,52 +2421,54 @@ router.get('/recruitment/onboarding', async (req, res) => {
       candidates = await recruitmentCol.find(query).toArray();
     }
     
-    // Transform candidates
-    const transformedCandidates = candidates.map((candidate, index) => {
-      const offerStatus = candidate.offerStatus || (candidate.hiringStatus === 'Hired' ? 'Accepted' : 'Sent');
-      const offerStatusColors = {
-        'Accepted': 'bg-green-100 text-green-700',
-        'Sent': 'bg-blue-100 text-blue-700',
-        'Pending': 'bg-yellow-100 text-yellow-700',
-        'Declined': 'bg-red-100 text-red-700'
-      };
-      
-      const onboardingStage = candidate.onboardingStage || 'Offer';
-      const onboardingStageColors = {
-        'Offer': 'bg-blue-100 text-blue-700',
-        'Form': 'bg-yellow-100 text-yellow-700',
-        'Verification': 'bg-orange-100 text-orange-700',
-        'Policy': 'bg-purple-100 text-purple-700',
-        'Asset': 'bg-green-100 text-green-700'
-      };
-      
-      const joiningDate = candidate.joiningDate ? new Date(candidate.joiningDate).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : 'N/A';
-      
-      // Calculate progress based on stage
-      const progressMap = {
-        'Offer': 0,
-        'Form': 15,
-        'Verification': 65,
-        'Policy': 15,
-        'Asset': 100
-      };
-      const progress = candidate.progress || progressMap[onboardingStage] || 0;
-      
-      return {
-        id: candidate._id?.toString() || index + 1,
-        name: candidate.candidateName || 'Unknown',
-        email: candidate.email || 'N/A',
-        contact: candidate.contactNumber || 'N/A',
-        position: candidate.position || candidate.jobTitle || 'N/A',
-        recruiter: candidate.assignedTo || 'Unassigned',
-        offerStatus: offerStatus,
-        offerStatusColor: offerStatusColors[offerStatus] || 'bg-slate-100 text-slate-700',
-        joiningDate: joiningDate,
-        onboardingStage: onboardingStage,
-        onboardingStageColor: onboardingStageColors[onboardingStage] || 'bg-slate-100 text-slate-700',
-        progress: progress
-      };
-    });
+    // Transform candidates - filter out candidates without valid _id
+    const transformedCandidates = candidates
+      .filter(candidate => candidate._id) // Only include candidates with valid _id
+      .map((candidate) => {
+        const offerStatus = candidate.offerStatus || (candidate.hiringStatus === 'Hired' ? 'Accepted' : 'Sent');
+        const offerStatusColors = {
+          'Accepted': 'bg-green-100 text-green-700',
+          'Sent': 'bg-blue-100 text-blue-700',
+          'Pending': 'bg-yellow-100 text-yellow-700',
+          'Declined': 'bg-red-100 text-red-700'
+        };
+        
+        const onboardingStage = candidate.onboardingStage || 'Offer';
+        const onboardingStageColors = {
+          'Offer': 'bg-blue-100 text-blue-700',
+          'Form': 'bg-yellow-100 text-yellow-700',
+          'Verification': 'bg-orange-100 text-orange-700',
+          'Policy': 'bg-purple-100 text-purple-700',
+          'Asset': 'bg-green-100 text-green-700'
+        };
+        
+        const joiningDate = candidate.joiningDate ? new Date(candidate.joiningDate).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : 'N/A';
+        
+        // Calculate progress based on stage
+        const progressMap = {
+          'Offer': 0,
+          'Form': 15,
+          'Verification': 65,
+          'Policy': 15,
+          'Asset': 100
+        };
+        const progress = candidate.progress || progressMap[onboardingStage] || 0;
+        
+        return {
+          id: candidate._id.toString(), // Always use _id.toString() - no fallback
+          name: candidate.candidateName || 'Unknown',
+          email: candidate.email || 'N/A',
+          contact: candidate.contactNumber || 'N/A',
+          position: candidate.position || candidate.jobTitle || 'N/A',
+          recruiter: candidate.assignedTo || 'Unassigned',
+          offerStatus: offerStatus,
+          offerStatusColor: offerStatusColors[offerStatus] || 'bg-slate-100 text-slate-700',
+          joiningDate: joiningDate,
+          onboardingStage: onboardingStage,
+          onboardingStageColor: onboardingStageColors[onboardingStage] || 'bg-slate-100 text-slate-700',
+          progress: progress
+        };
+      });
     
     // Calculate KPIs
     const totalOnboardings = transformedCandidates.length;
@@ -2921,30 +2928,35 @@ router.delete('/recruitment/candidates/:id', async (req, res) => {
     
     const { ObjectId } = require('mongodb');
     
-    // Validate ObjectId format
-    if (!ObjectId.isValid(candidateId)) {
-      return res.status(400).json({
-        success: false,
-        error: 'Invalid candidate ID format'
-      });
-    }
-    
     // If company is not specified, search across all databases
     let result = null;
-    if (!company || company === 'all' || company === 'undefined') {
-      const dbs = await getAllHrmsDbs();
-      for (const db of dbs) {
+    
+    // Check if candidateId is a valid ObjectId
+    if (ObjectId.isValid(candidateId)) {
+      // Try to delete by ObjectId
+      if (!company || company === 'all' || company === 'undefined') {
+        const dbs = await getAllHrmsDbs();
+        for (const db of dbs) {
+          const recruitmentCol = db.collection('recruitment');
+          result = await recruitmentCol.deleteOne({ _id: new ObjectId(candidateId) });
+          if (result.deletedCount > 0) {
+            break; // Found and deleted, exit loop
+          }
+        }
+      } else {
+        // Get HRMS database for specific company
+        const db = await getHrmsDb(company);
         const recruitmentCol = db.collection('recruitment');
         result = await recruitmentCol.deleteOne({ _id: new ObjectId(candidateId) });
-        if (result.deletedCount > 0) {
-          break; // Found and deleted, exit loop
-        }
       }
     } else {
-      // Get HRMS database for specific company
-      const db = await getHrmsDb(company);
-      const recruitmentCol = db.collection('recruitment');
-      result = await recruitmentCol.deleteOne({ _id: new ObjectId(candidateId) });
+      // If not a valid ObjectId, it might be a numeric fallback ID from frontend
+      // In this case, we can't reliably delete it as it's not a real database ID
+      // Return a helpful error message
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid candidate ID. This candidate may not be properly saved in the database. Please refresh the page and try again.'
+      });
     }
     
     if (!result || result.deletedCount === 0) {
@@ -2962,7 +2974,75 @@ router.delete('/recruitment/candidates/:id', async (req, res) => {
     console.error('HRMS delete candidate error:', error);
     res.status(500).json({
       success: false,
-      error: 'Internal server error'
+      error: error.message || 'Internal server error'
+    });
+  }
+});
+
+// Bulk delete recruitment candidates
+router.delete('/recruitment/candidates', async (req, res) => {
+  try {
+    await connectMongo();
+    const company = getCompanyFromRequest(req);
+    const { ids } = req.body; // Array of candidate IDs
+    
+    if (!ids || !Array.isArray(ids) || ids.length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'Please provide an array of candidate IDs to delete'
+      });
+    }
+    
+    const { ObjectId } = require('mongodb');
+    
+    // Filter out invalid ObjectIds
+    const validIds = ids.filter(id => ObjectId.isValid(id));
+    
+    if (validIds.length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'No valid candidate IDs provided'
+      });
+    }
+    
+    // Convert to ObjectIds
+    const objectIds = validIds.map(id => new ObjectId(id));
+    
+    let totalDeleted = 0;
+    
+    // If company is not specified, search across all databases
+    if (!company || company === 'all' || company === 'undefined') {
+      const dbs = await getAllHrmsDbs();
+      for (const db of dbs) {
+        const recruitmentCol = db.collection('recruitment');
+        const result = await recruitmentCol.deleteMany({ _id: { $in: objectIds } });
+        totalDeleted += result.deletedCount;
+      }
+    } else {
+      // Get HRMS database for specific company
+      const db = await getHrmsDb(company);
+      const recruitmentCol = db.collection('recruitment');
+      const result = await recruitmentCol.deleteMany({ _id: { $in: objectIds } });
+      totalDeleted = result.deletedCount;
+    }
+    
+    if (totalDeleted === 0) {
+      return res.status(404).json({
+        success: false,
+        error: 'No candidates found to delete'
+      });
+    }
+    
+    res.json({
+      success: true,
+      message: `Successfully deleted ${totalDeleted} candidate(s)`,
+      deletedCount: totalDeleted
+    });
+  } catch (error) {
+    console.error('HRMS bulk delete candidates error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Internal server error'
     });
   }
 });
