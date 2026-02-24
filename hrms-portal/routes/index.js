@@ -2926,6 +2926,14 @@ router.delete('/recruitment/candidates/:id', async (req, res) => {
     const company = getCompanyFromRequest(req);
     const candidateId = req.params.id;
     
+    // Validate candidateId exists
+    if (!candidateId || candidateId === 'undefined' || candidateId.trim() === '') {
+      return res.status(400).json({
+        success: false,
+        error: 'Candidate ID is required'
+      });
+    }
+    
     const { ObjectId } = require('mongodb');
     
     // If company is not specified, search across all databases
