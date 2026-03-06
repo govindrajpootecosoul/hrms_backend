@@ -10,6 +10,9 @@ function getCompanyFromRequest(req) {
   return req.query.company || req.headers['x-company'] || null;
 }
 
+/** Fixed recruiter names for "All Recruiters" dropdown in recruitment */
+const RECRUITMENT_RECRUITER_NAMES = ['Priyanka', 'Charu', 'Megha', 'Harshita', 'Deepali'];
+
 /**
  * Get HRMS database (company-specific or all data for admin)
  * For HRMS Admin Portal, if company is null or 'all', return default database with all data
@@ -2072,39 +2075,8 @@ router.get('/recruitment/candidates', async (req, res) => {
     const hired = transformedCandidates.filter(c => c.status === 'Hired').length;
     const onHold = transformedCandidates.filter(c => c.status === 'On Hold').length;
     
-    // Get HR list for filters - aggregate from all companies for admin portal
-    const { getUsersCollection } = require('../../config/mongo');
-    let hrList = [];
-    const hrSet = new Set();
-    
-    try {
-      if (!company || company === 'all' || company === 'undefined') {
-        // Get HRs from all companies for admin portal
-        const companyNames = ['Ecosoul Home', 'Thrive'];
-        for (const companyName of companyNames) {
-          try {
-            const usersCol = await getUsersCollection(null, companyName);
-            const employees = await usersCol.find({ role: { $in: ['hr', 'HR', 'recruiter', 'Recruiter'] } }).toArray();
-            employees.forEach(emp => {
-              const name = emp.name || emp.firstName;
-              if (name && name !== 'Unknown') {
-                hrSet.add(name);
-              }
-            });
-          } catch (err) {
-            // Continue to next company
-          }
-        }
-        hrList = Array.from(hrSet);
-      } else {
-        // Get HRs from specific company
-        const usersCol = await getUsersCollection(null, company);
-        const employees = await usersCol.find({ role: { $in: ['hr', 'HR', 'recruiter', 'Recruiter'] } }).toArray();
-        hrList = employees.map(emp => emp.name || emp.firstName || 'Unknown').filter(Boolean);
-      }
-    } catch (err) {
-      console.error('Error fetching HR list:', err);
-    }
+    // Recruiter dropdown: fixed list (All Recruiters + Priyanka, Charu, Megha, Harshita)
+    const hrList = ['All Recruiters', ...RECRUITMENT_RECRUITER_NAMES];
     
     res.json({
       success: true,
@@ -2117,7 +2089,7 @@ router.get('/recruitment/candidates', async (req, res) => {
           hired,
           onHold
         },
-        hrList: ['All Recruiters', ...hrList]
+        hrList
       }
     });
   } catch (error) {
@@ -2262,39 +2234,8 @@ router.get('/recruitment/hiring', async (req, res) => {
     const rejected = transformedCandidates.filter(c => c.hiringStatus === 'Rejected').length;
     const awaiting = transformedCandidates.filter(c => c.hiringStatus === 'Awaiting').length;
     
-    // Get HR list - aggregate from all companies for admin portal
-    const { getUsersCollection } = require('../../config/mongo');
-    let hrList = [];
-    const hrSet = new Set();
-    
-    try {
-      if (!company || company === 'all' || company === 'undefined') {
-        // Get HRs from all companies
-        const companyNames = ['Ecosoul Home', 'Thrive'];
-        for (const companyName of companyNames) {
-          try {
-            const usersCol = await getUsersCollection(null, companyName);
-            const employees = await usersCol.find({ role: { $in: ['hr', 'HR', 'recruiter', 'Recruiter'] } }).toArray();
-            employees.forEach(emp => {
-              const name = emp.name || emp.firstName;
-              if (name && name !== 'Unknown') {
-                hrSet.add(name);
-              }
-            });
-          } catch (err) {
-            // Continue to next company
-          }
-        }
-        hrList = Array.from(hrSet);
-      } else {
-        // Get HRs from specific company
-        const usersCol = await getUsersCollection(null, company);
-        const employees = await usersCol.find({ role: { $in: ['hr', 'HR', 'recruiter', 'Recruiter'] } }).toArray();
-        hrList = employees.map(emp => emp.name || emp.firstName || 'Unknown').filter(Boolean);
-      }
-    } catch (err) {
-      console.error('Error fetching HR list:', err);
-    }
+    // Recruiter dropdown: fixed list (All Recruiters + Priyanka, Charu, Megha, Harshita)
+    const hrList = ['All Recruiters', ...RECRUITMENT_RECRUITER_NAMES];
     
     res.json({
       success: true,
@@ -2306,7 +2247,7 @@ router.get('/recruitment/hiring', async (req, res) => {
           rejected,
           awaiting
         },
-        hrList: ['All Recruiters', ...hrList]
+        hrList
       }
     });
   } catch (error) {
@@ -2477,39 +2418,8 @@ router.get('/recruitment/onboarding', async (req, res) => {
     const offersDeclined = transformedCandidates.filter(c => c.offerStatus === 'Declined').length;
     const completedOnboardings = transformedCandidates.filter(c => c.onboardingStage === 'Asset' && c.progress === 100).length;
     
-    // Get HR list - aggregate from all companies for admin portal
-    const { getUsersCollection } = require('../../config/mongo');
-    let hrList = [];
-    const hrSet = new Set();
-    
-    try {
-      if (!company || company === 'all' || company === 'undefined') {
-        // Get HRs from all companies
-        const companyNames = ['Ecosoul Home', 'Thrive'];
-        for (const companyName of companyNames) {
-          try {
-            const usersCol = await getUsersCollection(null, companyName);
-            const employees = await usersCol.find({ role: { $in: ['hr', 'HR', 'recruiter', 'Recruiter'] } }).toArray();
-            employees.forEach(emp => {
-              const name = emp.name || emp.firstName;
-              if (name && name !== 'Unknown') {
-                hrSet.add(name);
-              }
-            });
-          } catch (err) {
-            // Continue to next company
-          }
-        }
-        hrList = Array.from(hrSet);
-      } else {
-        // Get HRs from specific company
-        const usersCol = await getUsersCollection(null, company);
-        const employees = await usersCol.find({ role: { $in: ['hr', 'HR', 'recruiter', 'Recruiter'] } }).toArray();
-        hrList = employees.map(emp => emp.name || emp.firstName || 'Unknown').filter(Boolean);
-      }
-    } catch (err) {
-      console.error('Error fetching HR list:', err);
-    }
+    // Recruiter dropdown: fixed list (All Recruiters + Priyanka, Charu, Megha, Harshita)
+    const hrList = ['All Recruiters', ...RECRUITMENT_RECRUITER_NAMES];
     
     res.json({
       success: true,
@@ -2522,7 +2432,7 @@ router.get('/recruitment/onboarding', async (req, res) => {
           offersDeclined,
           completedOnboardings
         },
-        hrList: ['All Recruiters', ...hrList]
+        hrList
       }
     });
   } catch (error) {
