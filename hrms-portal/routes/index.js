@@ -4,10 +4,46 @@ const { connectMongo, getDb, getEmployeePortalDb } = require('../../config/mongo
 const { getCompanyDatabaseName } = require('../../config/database.config');
 
 /**
- * Get company from request (query parameter or header)
+ * Get company from request (query parameter, route param, or header)
+ * Supports:
+ * - ?company=Thrive
+ * - ?companyId=2 (normalized later to 'Thrive')
+ * - x-company header
  */
 function getCompanyFromRequest(req) {
-  return req.query.company || req.headers['x-company'] || null;
+  return (
+    req.query.company ||
+    req.query.companyId ||
+    req.headers['x-company'] ||
+    null
+  );
+}
+
+/**
+ * Normalize company value to canonical name ('Ecosoul Home' or 'Thrive').
+ * Returns null if missing or invalid (multi-tenant: never return other company's data).
+ */
+function normalizeCompany(value) {
+  if (value == null || value === '' || value === 'undefined') return null;
+  const raw = String(value).trim();
+  if (!raw || raw === 'all') return null;
+  const lc = raw.toLowerCase();
+  if (lc === '1' || lc === 'ecosoul' || lc === 'ecosoulhome' || lc === 'eco soul' || lc === 'ecosoul home') return 'Ecosoul Home';
+  if (lc === '2' || lc === 'thrive' || lc === 'thrive brands' || lc === 'thrivebrands') return 'Thrive';
+  return raw;
+}
+
+/**
+ * Require company for company-scoped routes. Sends 400 if missing.
+ * @returns {string|null} Normalized company name or null (response already sent)
+ */
+function requireCompany(req, res) {
+  const company = normalizeCompany(getCompanyFromRequest(req));
+  if (!company) {
+    res.status(400).json({ success: false, error: 'Company is required. Please ensure your company is selected.' });
+    return null;
+  }
+  return company;
 }
 
 /** Fixed recruiter names for "All Recruiters" dropdown in recruitment */
@@ -91,43 +127,21 @@ async function getEmployeeDbForHrms(company = null) {
 // HRMS Portal Routes
 // All HRMS-related endpoints will be defined here
 
-// Get all employees
+// Get all employees (company-scoped: only return employees for the requested company)
 router.get('/employees', async (req, res) => {
   try {
+    const company = requireCompany(req, res);
+    if (!company) return;
     await connectMongo();
-    let company = getCompanyFromRequest(req);
     const { search, department, status } = req.query;
     
-    // Normalize company name
-    if (!company || company === '1' || company === 'undefined') {
-      company = 'Ecosoul Home';
-    }
-    
-    // Get users collection based on company
     const { getUsersCollection } = require('../../config/mongo');
     let usersCol;
-    let totalCount = 0;
-    
     try {
       usersCol = await getUsersCollection(null, company);
-      totalCount = await usersCol.countDocuments({});
-      
-      // If count is 0, try the other company collection
-      if (totalCount === 0) {
-        const otherCompany = company === 'Ecosoul Home' ? 'Thrive' : 'Ecosoul Home';
-        const otherUsersCol = await getUsersCollection(null, otherCompany);
-        const otherCount = await otherUsersCol.countDocuments({});
-        if (otherCount > 0) {
-          usersCol = otherUsersCol;
-          company = otherCompany;
-          totalCount = otherCount;
-          console.log(`[employees] Found ${totalCount} employees in ${otherCompany} collection`);
-        }
-      }
     } catch (err) {
       console.error(`[employees] Error getting employees for ${company}:`, err);
-      // Try default collection
-      usersCol = await getUsersCollection(null, 'Ecosoul Home');
+      return res.status(500).json({ success: false, error: 'Failed to load employees for this company.' });
     }
     
     // Build query
@@ -183,20 +197,12 @@ router.get('/employees', async (req, res) => {
   }
 });
 
-// Get all employees attendance data
+// Get all employees attendance data (company-scoped)
 router.get('/attendance', async (req, res) => {
   try {
+    const companyName = requireCompany(req, res);
+    if (!companyName) return;
     await connectMongo();
-    // Normalize company early (same as stats endpoint)
-    const requestedCompany = getCompanyFromRequest(req);
-    let companyName = requestedCompany;
-    if (!companyName || companyName === '1' || companyName === 'undefined') {
-      companyName = 'Ecosoul Home';
-    }
-    // Normalize common aliases
-    if (companyName.toLowerCase() === 'ecosoul' || companyName.toLowerCase() === 'ecosoul home') {
-      companyName = 'Ecosoul Home';
-    }
     
     const date = req.query.date || new Date().toISOString().split('T')[0]; // Default to today
     const department = req.query.department || 'all';
@@ -246,43 +252,6 @@ router.get('/attendance', async (req, res) => {
       }
     }
     
-    // Fallback: if company DB has no check-ins, try the default employee DB
-    if (checkIns.length === 0 && requestedCompany) {
-      try {
-        const defaultEmployeeDb = await getEmployeeDbForHrms(null);
-        const defaultCol = defaultEmployeeDb.collection('employee_checkins');
-        
-        // Try date field first
-        let fallbackCheckIns = await defaultCol.find({ date }).sort({ checkInTime: -1 }).toArray();
-        
-        // If no results, try checkInTime range
-        if (fallbackCheckIns.length === 0) {
-          const todayDate = new Date(date);
-          const startOfDay = new Date(todayDate);
-          startOfDay.setHours(0, 0, 0, 0);
-          const endOfDay = new Date(todayDate);
-          endOfDay.setHours(23, 59, 59, 999);
-          
-          fallbackCheckIns = await defaultCol.find({
-            checkInTime: {
-              $gte: startOfDay,
-              $lte: endOfDay
-            }
-          }).sort({ checkInTime: -1 }).toArray();
-        }
-        
-        if (fallbackCheckIns.length > 0) {
-          console.log(`[attendance] Fallback: Found ${fallbackCheckIns.length} check-ins in default employee DB for date: ${date}`);
-          checkIns = fallbackCheckIns;
-          col = defaultCol;
-        } else {
-          console.log(`[attendance] Fallback: No check-ins found in default employee DB for date: ${date}`);
-        }
-      } catch (e) {
-        console.error('[attendance] Fallback to default employee DB failed:', e);
-      }
-    }
-
     // Get all employees to map employeeId to employee details
     const allEmployees = await usersCol.find({}).toArray();
     const employeeMap = new Map();
@@ -366,45 +335,19 @@ router.get('/attendance', async (req, res) => {
   }
 });
 
-// Get attendance statistics
+// Get attendance statistics (company-scoped)
 router.get('/attendance/stats', async (req, res) => {
   try {
+    const effectiveCompany = requireCompany(req, res);
+    if (!effectiveCompany) return;
     await connectMongo();
-    // Normalize company early and use consistently across DB selection + queries.
-    // We've seen requests coming in with company = '1' / 'undefined', which previously caused
-    // us to select the wrong DB (leading to presentCount=0) even though employee lookup defaulted
-    // to 'Ecosoul Home' later.
-    const requestedCompany = getCompanyFromRequest(req);
-    const normalizedCompanyRaw =
-      !requestedCompany || requestedCompany === '1' || requestedCompany === 'undefined'
-        ? null
-        : requestedCompany;
-
-    // Handle common aliases / inconsistent casing from different parts of the app
-    // (e.g. "EcoSoul" coming from UI/session storage)
-    const normalizedCompany = (() => {
-      if (!normalizedCompanyRaw) return null;
-      const c = String(normalizedCompanyRaw).trim();
-      const lc = c.toLowerCase();
-      if (lc === 'ecosoul' || lc === 'ecosoulhome' || lc === 'eco soul') return 'Ecosoul Home';
-      if (lc === 'ecosoul home') return 'Ecosoul Home';
-      return c;
-    })();
     const date = req.query.date || new Date().toISOString().split('T')[0];
     
-    // Get employee database (company-specific if company is provided)
-    // NOTE: In some deployments, check-ins may still be stored in the default employee DB.
-    // We'll query company DB first, then fall back to default DB if no records are found.
-    const effectiveCompany = normalizedCompany || 'Ecosoul Home';
     const db = await getEmployeeDbForHrms(effectiveCompany);
     let col = db.collection('employee_checkins');
 
-    // Get employees collection for total count
     const { getUsersCollection } = require('../../config/mongo');
-    // Try to get company name, default to 'Ecosoul Home' if not provided
-    let companyName = effectiveCompany;
-    
-    // Try both collections if company name is ambiguous
+    const companyName = effectiveCompany;
     let totalEmployees = 0;
     let employeesList = [];
     try {
@@ -412,29 +355,9 @@ router.get('/attendance/stats', async (req, res) => {
       employeesList = await usersCol.find({}).toArray();
       totalEmployees = employeesList.length;
       console.log(`[attendance/stats] Total employees: ${totalEmployees} for company: ${companyName}`);
-      
-      // If count is 0, try the other company collection
-      if (totalEmployees === 0 && (companyName === 'Ecosoul Home' || !company)) {
-        const otherCompany = companyName === 'Ecosoul Home' ? 'Thrive' : 'Ecosoul Home';
-        const otherUsersCol = await getUsersCollection(null, otherCompany);
-        employeesList = await otherUsersCol.find({}).toArray();
-        totalEmployees = employeesList.length;
-        if (totalEmployees > 0) {
-          companyName = otherCompany;
-          console.log(`[attendance/stats] Found ${totalEmployees} employees in ${otherCompany} collection`);
-        }
-      }
     } catch (err) {
       console.error(`[attendance/stats] Error getting employees for ${companyName}:`, err);
-      // Try default collection
-      try {
-        const defaultUsersCol = await getUsersCollection(null, 'Ecosoul Home');
-        employeesList = await defaultUsersCol.find({}).toArray();
-        totalEmployees = employeesList.length;
-        console.log(`[attendance/stats] Using default collection, found ${totalEmployees} employees`);
-      } catch (defaultErr) {
-        console.error('[attendance/stats] Error with default collection:', defaultErr);
-      }
+      return res.status(500).json({ success: false, error: 'Failed to load attendance stats for this company.' });
     }
 
     // Debug: Check total records in collection and sample records
@@ -514,44 +437,6 @@ router.get('/attendance/stats', async (req, res) => {
         console.log(`[attendance/stats] Found ${todayCheckIns.length} check-in records using checkInTime range query (company DB)`);
       } catch (e) {
         console.error('[attendance/stats] Alternative query by checkInTime failed:', e);
-      }
-    }
-    
-    // Fallback: if company DB has no check-ins, try the default employee DB
-    // (some deployments still store check-ins in the base employee DB)
-    if (todayCheckIns.length === 0) {
-      try {
-        const defaultEmployeeDb = await getEmployeeDbForHrms(null);
-        const defaultCol = defaultEmployeeDb.collection('employee_checkins');
-        
-        // Try date field first
-        let fallbackCheckIns = await defaultCol.find({ date }).toArray();
-        
-        // If no results, try checkInTime range
-        if (fallbackCheckIns.length === 0) {
-          const todayDate = new Date(date);
-          const startOfDay = new Date(todayDate);
-          startOfDay.setHours(0, 0, 0, 0);
-          const endOfDay = new Date(todayDate);
-          endOfDay.setHours(23, 59, 59, 999);
-          
-          fallbackCheckIns = await defaultCol.find({
-            checkInTime: {
-              $gte: startOfDay,
-              $lte: endOfDay
-            }
-          }).toArray();
-        }
-        
-        if (fallbackCheckIns.length > 0) {
-          console.log(`[attendance/stats] Fallback: Found ${fallbackCheckIns.length} check-in records in default employee DB for date: ${date}`);
-          todayCheckIns = fallbackCheckIns;
-          col = defaultCol;
-        } else {
-          console.log(`[attendance/stats] Fallback: No check-ins found in default employee DB for date: ${date}`);
-        }
-      } catch (e) {
-        console.error('[attendance/stats] Fallback to default employee DB failed:', e);
       }
     }
     
@@ -837,15 +722,15 @@ router.get('/leaves', async (req, res) => {
   }
 });
 
-// Get all attendance requests (for approval)
+// Get all attendance requests (for approval) - company-scoped
 router.get('/attendance-requests', async (req, res) => {
   try {
+    const company = requireCompany(req, res);
+    if (!company) return;
     await connectMongo();
-    const company = getCompanyFromRequest(req);
     const status = req.query.status || 'all'; // 'all', 'pending', 'approved', 'rejected'
     const type = req.query.type || 'all'; // 'all', 'regularization', 'on-duty', 'time-off'
     
-    // Get employee database where attendance requests are stored
     const db = await getEmployeeDbForHrms(company);
     const col = db.collection('attendance_requests');
 
@@ -900,13 +785,12 @@ router.get('/attendance-requests', async (req, res) => {
   }
 });
 
-// Get leave overview statistics (for leave overview page)
+// Get leave overview statistics (for leave overview page) - company-scoped
 router.get('/leaves/overview/stats', async (req, res) => {
   try {
+    const company = requireCompany(req, res);
+    if (!company) return;
     await connectMongo();
-    const company = getCompanyFromRequest(req);
-    
-    // Get employee database where attendance requests are stored
     const db = await getEmployeeDbForHrms(company);
     const requestsCol = db.collection('attendance_requests');
 
@@ -972,14 +856,13 @@ router.get('/leaves/overview/stats', async (req, res) => {
   }
 });
 
-// Get yearly leave utilization data
+// Get yearly leave utilization data - company-scoped
 router.get('/leaves/overview/utilization', async (req, res) => {
   try {
+    const company = requireCompany(req, res);
+    if (!company) return;
     await connectMongo();
-    const company = getCompanyFromRequest(req);
     const year = req.query.year || new Date().getFullYear();
-    
-    // Get employee database where attendance requests are stored
     const db = await getEmployeeDbForHrms(company);
     const requestsCol = db.collection('attendance_requests');
 
@@ -1072,13 +955,12 @@ router.get('/leaves/overview/utilization', async (req, res) => {
   }
 });
 
-// Get attendance request statistics
+// Get attendance request statistics - company-scoped
 router.get('/attendance-requests/stats', async (req, res) => {
   try {
+    const company = requireCompany(req, res);
+    if (!company) return;
     await connectMongo();
-    const company = getCompanyFromRequest(req);
-    
-    // Get employee database where attendance requests are stored
     const db = await getEmployeeDbForHrms(company);
     const col = db.collection('attendance_requests');
 
@@ -1123,13 +1005,14 @@ router.get('/attendance-requests/stats', async (req, res) => {
   }
 });
 
-// Approve attendance request
+// Approve attendance request - company-scoped
 router.post('/attendance-requests/:requestId/approve', async (req, res) => {
   try {
+    const company = requireCompany(req, res);
+    if (!company) return;
     await connectMongo();
     const { requestId } = req.params;
     const { approvedBy } = req.body;
-    const company = getCompanyFromRequest(req);
     
     if (!requestId) {
       return res.status(400).json({ success: false, error: 'Request ID is required' });
@@ -1270,13 +1153,14 @@ router.post('/attendance-requests/:requestId/approve', async (req, res) => {
   }
 });
 
-// Reject attendance request
+// Reject attendance request - company-scoped
 router.post('/attendance-requests/:requestId/reject', async (req, res) => {
   try {
+    const company = requireCompany(req, res);
+    if (!company) return;
     await connectMongo();
     const { requestId } = req.params;
     const { rejectedBy, rejectionReason } = req.body;
-    const company = getCompanyFromRequest(req);
     
     if (!requestId) {
       return res.status(400).json({ success: false, error: 'Request ID is required' });
@@ -1332,12 +1216,13 @@ router.post('/attendance-requests/:requestId/reject', async (req, res) => {
   }
 });
 
-// Update attendance request (edit)
+// Update attendance request (edit) - company-scoped
 router.put('/attendance-requests/:requestId', async (req, res) => {
   try {
+    const company = requireCompany(req, res);
+    if (!company) return;
     await connectMongo();
     const { requestId } = req.params;
-    const company = getCompanyFromRequest(req);
 
     if (!requestId) {
       return res.status(400).json({ success: false, error: 'Request ID is required' });
@@ -1415,12 +1300,13 @@ router.put('/attendance-requests/:requestId', async (req, res) => {
   }
 });
 
-// Delete attendance request
+// Delete attendance request - company-scoped
 router.delete('/attendance-requests/:requestId', async (req, res) => {
   try {
+    const company = requireCompany(req, res);
+    if (!company) return;
     await connectMongo();
     const { requestId } = req.params;
-    const company = getCompanyFromRequest(req);
 
     if (!requestId) {
       return res.status(400).json({ success: false, error: 'Request ID is required' });
@@ -1460,11 +1346,12 @@ router.delete('/attendance-requests/:requestId', async (req, res) => {
   }
 });
 
-// Create attendance request (admin - Add Leave Request)
+// Create attendance request (admin - Add Leave Request) - company-scoped
 router.post('/attendance-requests', async (req, res) => {
   try {
+    const company = requireCompany(req, res);
+    if (!company) return;
     await connectMongo();
-    const company = getCompanyFromRequest(req);
 
     const {
       employeeId,
@@ -1546,13 +1433,12 @@ router.post('/attendance-requests', async (req, res) => {
   }
 });
 
-// Get leave policy
+// Get leave policy - company-scoped
 router.get('/leave-policy', async (req, res) => {
   try {
+    const company = requireCompany(req, res);
+    if (!company) return;
     await connectMongo();
-    const company = getCompanyFromRequest(req);
-    
-    // Get HRMS database
     const db = await getHrmsDb(company);
     const col = db.collection('leave_policies');
     
@@ -1618,11 +1504,12 @@ router.get('/leave-policy', async (req, res) => {
   }
 });
 
-// Update leave policy
+// Update leave policy - company-scoped
 router.put('/leave-policy', async (req, res) => {
   try {
+    const company = requireCompany(req, res);
+    if (!company) return;
     await connectMongo();
-    const company = getCompanyFromRequest(req);
     const { '0-6months': months0_6, '6-12months': months6_12, '1year+': year1Plus } = req.body;
     
     if (!months0_6 || !months6_12 || !year1Plus) {
@@ -1668,14 +1555,13 @@ router.put('/leave-policy', async (req, res) => {
   }
 });
 
-// Get recruitment analytics
+// Get recruitment analytics - company-scoped
 router.get('/recruitment/analytics', async (req, res) => {
   try {
+    const company = requireCompany(req, res);
+    if (!company) return;
     await connectMongo();
-    const company = getCompanyFromRequest(req);
     const { month, hr, department } = req.query;
-    
-    // Get HRMS database
     const db = await getHrmsDb(company);
     const recruitmentCol = db.collection('recruitment');
     
@@ -1949,73 +1835,34 @@ router.get('/recruitment/analytics', async (req, res) => {
   }
 });
 
-// Get recruitment candidates (for Sourcing & Screening)
+// Get recruitment candidates (for Sourcing & Screening) - company-scoped
 router.get('/recruitment/candidates', async (req, res) => {
   try {
+    const company = requireCompany(req, res);
+    if (!company) return;
     await connectMongo();
-    const company = getCompanyFromRequest(req);
     const { status, recruiter, experience, search } = req.query;
     
-    // For HRMS Admin Portal - get data from all companies if no company specified
-    let candidates = [];
+    const db = await getHrmsDb(company);
+    const recruitmentCol = db.collection('recruitment');
     
-    if (!company || company === 'all' || company === 'undefined') {
-      // Get all databases and aggregate data
-      const dbs = await getAllHrmsDbs();
-      const allCandidatesPromises = dbs.map(async (db) => {
-        const recruitmentCol = db.collection('recruitment');
-        
-        // Build query filters
-        const query = {};
-        if (status && status !== 'All Status') {
-          query.status = status;
-        }
-        if (recruiter && recruiter !== 'All Recruiters') {
-          query.assignedTo = recruiter;
-        }
-        
-        // Search filter
-        if (search) {
-          query.$or = [
-            { candidateName: { $regex: search, $options: 'i' } },
-            { email: { $regex: search, $options: 'i' } },
-            { contactNumber: { $regex: search, $options: 'i' } },
-            { currentOrganisation: { $regex: search, $options: 'i' } }
-          ];
-        }
-        
-        return await recruitmentCol.find(query).toArray();
-      });
-      
-      const allCandidatesArrays = await Promise.all(allCandidatesPromises);
-      candidates = allCandidatesArrays.flat();
-    } else {
-      // Get HRMS database for specific company
-      const db = await getHrmsDb(company);
-      const recruitmentCol = db.collection('recruitment');
-      
-      // Build query filters
-      const query = {};
-      if (status && status !== 'All Status') {
-        query.status = status;
-      }
-      if (recruiter && recruiter !== 'All Recruiters') {
-        query.assignedTo = recruiter;
-      }
-      
-      // Search filter
-      if (search) {
-        query.$or = [
-          { candidateName: { $regex: search, $options: 'i' } },
-          { email: { $regex: search, $options: 'i' } },
-          { contactNumber: { $regex: search, $options: 'i' } },
-          { currentOrganisation: { $regex: search, $options: 'i' } }
-        ];
-      }
-      
-      // Get all candidates
-      candidates = await recruitmentCol.find(query).toArray();
+    const query = {};
+    if (status && status !== 'All Status') {
+      query.status = status;
     }
+    if (recruiter && recruiter !== 'All Recruiters') {
+      query.assignedTo = recruiter;
+    }
+    if (search) {
+      query.$or = [
+        { candidateName: { $regex: search, $options: 'i' } },
+        { email: { $regex: search, $options: 'i' } },
+        { contactNumber: { $regex: search, $options: 'i' } },
+        { currentOrganisation: { $regex: search, $options: 'i' } }
+      ];
+    }
+    
+    const candidates = await recruitmentCol.find(query).toArray();
     
     // Filter by experience if provided
     let filteredCandidates = candidates;
@@ -2101,106 +1948,50 @@ router.get('/recruitment/candidates', async (req, res) => {
   }
 });
 
-// Get recruitment hiring candidates (for Recruitment & Hiring)
+// Get recruitment hiring candidates (for Recruitment & Hiring) - company-scoped
 router.get('/recruitment/hiring', async (req, res) => {
   try {
+    const company = requireCompany(req, res);
+    if (!company) return;
     await connectMongo();
-    const company = getCompanyFromRequest(req);
     const { status, recruiter, search } = req.query;
     
-    // For HRMS Admin Portal - get data from all companies if no company specified
-    let candidates = [];
+    const db = await getHrmsDb(company);
+    const recruitmentCol = db.collection('recruitment');
     
-    if (!company || company === 'all' || company === 'undefined') {
-      // Get all databases and aggregate data
-      const dbs = await getAllHrmsDbs();
-      const allCandidatesPromises = dbs.map(async (db) => {
-        const recruitmentCol = db.collection('recruitment');
-        
-        // Build query - candidates with interview status = Finalized, or with hiringStatus (Hired/Rejected/Awaiting)
-        const query = {
-          $or: [
-            { status: 'Finalized' },
-            { interviewStatus: 'Finalized' },
-            { status: 'Offer Sent' },
-            { hiringStatus: { $exists: true, $ne: null } }, // Include candidates with hiringStatus (Hired, Rejected, Awaiting)
-            { status: 'Rejected' }, // Include rejected candidates
-            { status: 'Hired' } // Include hired candidates
-          ]
-        };
-        
-        if (status && status !== 'All Status') {
-          if (status === 'Finalized') {
-            query.$or = [{ status: 'Finalized' }, { interviewStatus: 'Finalized' }];
-          } else {
-            query.status = status;
-          }
-        }
-        
-        if (recruiter && recruiter !== 'All Recruiters') {
-          query.assignedTo = recruiter;
-        }
-        
-        if (search) {
-          query.$and = query.$and || [];
-          query.$and.push({
-            $or: [
-              { candidateName: { $regex: search, $options: 'i' } },
-              { email: { $regex: search, $options: 'i' } },
-              { contactNumber: { $regex: search, $options: 'i' } },
-              { currentOrganisation: { $regex: search, $options: 'i' } }
-            ]
-          });
-        }
-        
-        return await recruitmentCol.find(query).toArray();
-      });
-      
-      const allCandidatesArrays = await Promise.all(allCandidatesPromises);
-      candidates = allCandidatesArrays.flat();
-    } else {
-      // Get HRMS database for specific company
-      const db = await getHrmsDb(company);
-      const recruitmentCol = db.collection('recruitment');
-      
-      // Build query - candidates with interview status = Finalized, or with hiringStatus (Hired/Rejected/Awaiting)
-      const query = {
-        $or: [
-          { status: 'Finalized' },
-          { interviewStatus: 'Finalized' },
-          { status: 'Offer Sent' },
-          { hiringStatus: { $exists: true, $ne: null } }, // Include candidates with hiringStatus (Hired, Rejected, Awaiting)
-          { status: 'Rejected' }, // Include rejected candidates
-          { status: 'Hired' } // Include hired candidates
-        ]
-      };
-      
-      if (status && status !== 'All Status') {
-        if (status === 'Finalized') {
-          query.$or = [{ status: 'Finalized' }, { interviewStatus: 'Finalized' }];
-        } else {
-          query.status = status;
-        }
+    const query = {
+      $or: [
+        { status: 'Finalized' },
+        { interviewStatus: 'Finalized' },
+        { status: 'Offer Sent' },
+        { hiringStatus: { $exists: true, $ne: null } },
+        { status: 'Rejected' },
+        { status: 'Hired' }
+      ]
+    };
+    if (status && status !== 'All Status') {
+      if (status === 'Finalized') {
+        query.$or = [{ status: 'Finalized' }, { interviewStatus: 'Finalized' }];
+      } else {
+        query.status = status;
       }
-      
-      if (recruiter && recruiter !== 'All Recruiters') {
-        query.assignedTo = recruiter;
-      }
-      
-      if (search) {
-        query.$and = query.$and || [];
-        query.$and.push({
-          $or: [
-            { candidateName: { $regex: search, $options: 'i' } },
-            { email: { $regex: search, $options: 'i' } },
-            { contactNumber: { $regex: search, $options: 'i' } },
-            { currentOrganisation: { $regex: search, $options: 'i' } }
-          ]
-        });
-      }
-      
-      candidates = await recruitmentCol.find(query).toArray();
     }
+    if (recruiter && recruiter !== 'All Recruiters') {
+      query.assignedTo = recruiter;
+    }
+    if (search) {
+      query.$and = query.$and || [];
+      query.$and.push({
+        $or: [
+          { candidateName: { $regex: search, $options: 'i' } },
+          { email: { $regex: search, $options: 'i' } },
+          { contactNumber: { $regex: search, $options: 'i' } },
+          { currentOrganisation: { $regex: search, $options: 'i' } }
+        ]
+      });
+    }
+    
+    const candidates = await recruitmentCol.find(query).toArray();
     
     // Transform candidates - filter out candidates without valid _id
     const transformedCandidates = candidates
@@ -2259,108 +2050,50 @@ router.get('/recruitment/hiring', async (req, res) => {
   }
 });
 
-// Get onboarding candidates (for Onboarding)
+// Get onboarding candidates (for Onboarding) - company-scoped
 router.get('/recruitment/onboarding', async (req, res) => {
   try {
+    const company = requireCompany(req, res);
+    if (!company) return;
     await connectMongo();
-    const company = getCompanyFromRequest(req);
     const { status, stage, recruiter, search } = req.query;
     
-    // For HRMS Admin Portal - get data from all companies if no company specified
-    let candidates = [];
+    const db = await getHrmsDb(company);
+    const recruitmentCol = db.collection('recruitment');
     
-    if (!company || company === 'all' || company === 'undefined') {
-      // Get all databases and aggregate data
-      const dbs = await getAllHrmsDbs();
-      const allCandidatesPromises = dbs.map(async (db) => {
-        const recruitmentCol = db.collection('recruitment');
-        
-        // Build query - candidates with offer accepted or hired
-        const query = {
-          $or: [
-            { hiringStatus: 'Hired' },
-            { offerStatus: 'Accepted' },
-            { status: 'Hired' }
-          ]
-        };
-        
-        if (status && status !== 'All Status') {
-          if (status === 'Accepted') {
-            query.$or = [{ offerStatus: 'Accepted' }, { hiringStatus: 'Hired' }];
-          } else {
-            query.offerStatus = status;
-          }
-        }
-        
-        if (stage && stage !== 'All Stages') {
-          query.onboardingStage = stage;
-        }
-        
-        if (recruiter && recruiter !== 'All Recruiters') {
-          query.assignedTo = recruiter;
-        }
-        
-        if (search) {
-          query.$and = query.$and || [];
-          query.$and.push({
-            $or: [
-              { candidateName: { $regex: search, $options: 'i' } },
-              { email: { $regex: search, $options: 'i' } },
-              { contactNumber: { $regex: search, $options: 'i' } },
-              { position: { $regex: search, $options: 'i' } }
-            ]
-          });
-        }
-        
-        return await recruitmentCol.find(query).toArray();
-      });
-      
-      const allCandidatesArrays = await Promise.all(allCandidatesPromises);
-      candidates = allCandidatesArrays.flat();
-    } else {
-      // Get HRMS database for specific company
-      const db = await getHrmsDb(company);
-      const recruitmentCol = db.collection('recruitment');
-      
-      // Build query - candidates with offer accepted or hired
-      const query = {
-        $or: [
-          { hiringStatus: 'Hired' },
-          { offerStatus: 'Accepted' },
-          { status: 'Hired' }
-        ]
-      };
-      
-      if (status && status !== 'All Status') {
-        if (status === 'Accepted') {
-          query.$or = [{ offerStatus: 'Accepted' }, { hiringStatus: 'Hired' }];
-        } else {
-          query.offerStatus = status;
-        }
+    const query = {
+      $or: [
+        { hiringStatus: 'Hired' },
+        { offerStatus: 'Accepted' },
+        { status: 'Hired' }
+      ]
+    };
+    if (status && status !== 'All Status') {
+      if (status === 'Accepted') {
+        query.$or = [{ offerStatus: 'Accepted' }, { hiringStatus: 'Hired' }];
+      } else {
+        query.offerStatus = status;
       }
-      
-      if (stage && stage !== 'All Stages') {
-        query.onboardingStage = stage;
-      }
-      
-      if (recruiter && recruiter !== 'All Recruiters') {
-        query.assignedTo = recruiter;
-      }
-      
-      if (search) {
-        query.$and = query.$and || [];
-        query.$and.push({
-          $or: [
-            { candidateName: { $regex: search, $options: 'i' } },
-            { email: { $regex: search, $options: 'i' } },
-            { contactNumber: { $regex: search, $options: 'i' } },
-            { position: { $regex: search, $options: 'i' } }
-          ]
-        });
-      }
-      
-      candidates = await recruitmentCol.find(query).toArray();
     }
+    if (stage && stage !== 'All Stages') {
+      query.onboardingStage = stage;
+    }
+    if (recruiter && recruiter !== 'All Recruiters') {
+      query.assignedTo = recruiter;
+    }
+    if (search) {
+      query.$and = query.$and || [];
+      query.$and.push({
+        $or: [
+          { candidateName: { $regex: search, $options: 'i' } },
+          { email: { $regex: search, $options: 'i' } },
+          { contactNumber: { $regex: search, $options: 'i' } },
+          { position: { $regex: search, $options: 'i' } }
+        ]
+      });
+    }
+    
+    const candidates = await recruitmentCol.find(query).toArray();
     
     // Transform candidates - filter out candidates without valid _id
     const transformedCandidates = candidates
@@ -2444,11 +2177,12 @@ router.get('/recruitment/onboarding', async (req, res) => {
   }
 });
 
-// Get single recruitment candidate by ID
+// Get single recruitment candidate by ID - company-scoped
 router.get('/recruitment/candidates/:id', async (req, res) => {
   try {
+    const company = requireCompany(req, res);
+    if (!company) return;
     await connectMongo();
-    const company = getCompanyFromRequest(req);
     const candidateId = req.params.id;
     
     if (!candidateId) {
@@ -2460,7 +2194,6 @@ router.get('/recruitment/candidates/:id', async (req, res) => {
     
     const { ObjectId } = require('mongodb');
     
-    // Validate ObjectId format
     if (!ObjectId.isValid(candidateId)) {
       return res.status(400).json({
         success: false,
@@ -2468,24 +2201,9 @@ router.get('/recruitment/candidates/:id', async (req, res) => {
       });
     }
     
-    let candidate = null;
-    
-    // If company is not specified, search across all databases
-    if (!company || company === 'all' || company === 'undefined') {
-      const dbs = await getAllHrmsDbs();
-      for (const db of dbs) {
-        const recruitmentCol = db.collection('recruitment');
-        candidate = await recruitmentCol.findOne({ _id: new ObjectId(candidateId) });
-        if (candidate) {
-          break; // Found, exit loop
-        }
-      }
-    } else {
-      // Get HRMS database for specific company
-      const db = await getHrmsDb(company);
-      const recruitmentCol = db.collection('recruitment');
-      candidate = await recruitmentCol.findOne({ _id: new ObjectId(candidateId) });
-    }
+    const db = await getHrmsDb(company);
+    const recruitmentCol = db.collection('recruitment');
+    const candidate = await recruitmentCol.findOne({ _id: new ObjectId(candidateId) });
     
     if (!candidate) {
       return res.status(404).json({
@@ -2540,15 +2258,14 @@ router.get('/recruitment/candidates/:id', async (req, res) => {
   }
 });
 
-// Create/Add new recruitment candidate
+// Create/Add new recruitment candidate - company-scoped
 router.post('/recruitment/candidates', async (req, res) => {
   try {
+    const company = requireCompany(req, res);
+    if (!company) return;
     await connectMongo();
-    const company = getCompanyFromRequest(req);
     const candidateData = req.body;
-    
-    // Get HRMS database - use default if no company specified (for admin portal)
-    const db = await getHrmsDb(company || null);
+    const db = await getHrmsDb(company);
     const recruitmentCol = db.collection('recruitment');
     
     // Prepare candidate document

@@ -90,30 +90,30 @@ router.get('/', async (req, res) => {
     const { filterDummy, company } = req.query;
     const shouldFilterDummy = filterDummy === 'true';
     
-    // Get the appropriate collection based on company name
-    // If company is provided, use company-specific collection
-    // If no company is provided, we'll need to query both collections or use a default
-    let usersCol;
-    let collectionName;
-    
-    if (company) {
-      // Use company name to get the appropriate collection
-      usersCol = await getUsersCollection(null, company);
-      collectionName = company.toLowerCase().includes('thrive') ? 'Thrive_Employees' : 'Ecosoul_Employees';
-    } else {
-      // If no company specified, default to Ecosoul for backward compatibility
-      // In the future, we might want to query both collections and merge results
-      usersCol = await getUsersCollection(null, 'Ecosoul Home');
-      collectionName = 'Ecosoul_Employees';
+    const normalized = (v) => {
+      if (!v || v === 'undefined' || v === 'all') return null;
+      const lc = String(v).trim().toLowerCase();
+      if (lc.includes('thrive')) return 'Thrive';
+      if (lc.includes('ecosoul') || lc === '1') return 'Ecosoul Home';
+      return v;
+    };
+    const resolvedCompany = normalized(company);
+    if (!resolvedCompany) {
+      return res.status(400).json({
+        success: false,
+        error: 'Company is required. Please ensure your company is selected.'
+      });
     }
     
-    // Build query object (no need to filter by company field since we're already in the right collection)
-    const query = {};
+    let usersCol;
+    let collectionName;
+    usersCol = await getUsersCollection(null, resolvedCompany);
+    collectionName = resolvedCompany.toLowerCase().includes('thrive') ? 'Thrive_Employees' : 'Ecosoul_Employees';
     
-    // Fetch users from the appropriate collection
+    const query = {};
     const allUsers = await usersCol.find(query).toArray();
     
-    console.log(`[admin-users] Fetched ${allUsers.length} total users from ${collectionName} collection in ${LOGIN_DB_NAME} database${company ? ` for company: ${company}` : ''}`);
+    console.log(`[admin-users] Fetched ${allUsers.length} total users from ${collectionName} collection in ${LOGIN_DB_NAME} database for company: ${resolvedCompany}`);
     
     // By default, show ALL users. Only filter if explicitly requested
     let usersToReturn = allUsers;
