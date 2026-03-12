@@ -1841,33 +1841,72 @@ router.get('/recruitment/candidates', async (req, res) => {
     const company = requireCompany(req, res);
     if (!company) return;
     await connectMongo();
-    const { status, recruiter, experience, search } = req.query;
+    const { status, recruiter, experience, search, year } = req.query;
     
     const db = await getHrmsDb(company);
     const recruitmentCol = db.collection('recruitment');
     
-    const query = {};
+    // Base query for status / recruiter / search (used for both year list and filtered results)
+    const baseQuery = {};
     if (status && status !== 'All Status') {
-      query.status = status;
+      baseQuery.status = status;
     }
     if (recruiter && recruiter !== 'All Recruiters') {
-      query.assignedTo = recruiter;
+      const recruiterRegex = new RegExp(`^${recruiter}$`, 'i');
+      baseQuery.assignedTo = recruiterRegex;
     }
     if (search) {
-      query.$or = [
+      baseQuery.$or = [
+        // Candidate core fields
         { candidateName: { $regex: search, $options: 'i' } },
         { email: { $regex: search, $options: 'i' } },
         { contactNumber: { $regex: search, $options: 'i' } },
-        { currentOrganisation: { $regex: search, $options: 'i' } }
+        { currentOrganisation: { $regex: search, $options: 'i' } },
+        // Additional columns visible in the table
+        { folderName: { $regex: search, $options: 'i' } },
+        { assignedTo: { $regex: search, $options: 'i' } },
+        { status: { $regex: search, $options: 'i' } }
       ];
     }
-    
+
+    // First, fetch all matching candidates (without year constraint) to derive available years
+    const allCandidates = await recruitmentCol.find(baseQuery).toArray();
+
+    // Derive available years strictly from callingDate (HR wants year of callingDate column)
+    const getCandidateYear = (candidate) => {
+      const value = candidate.callingDate;
+      if (!value) return null;
+      const dateObj = value instanceof Date ? value : new Date(value);
+      if (isNaN(dateObj)) return null;
+      return dateObj.getFullYear();
+    };
+
+    const yearSet = new Set();
+    allCandidates.forEach(candidate => {
+      const candidateYear = getCandidateYear(candidate);
+      if (candidateYear) {
+        yearSet.add(candidateYear);
+      }
+    });
+    const years = Array.from(yearSet).sort((a, b) => b - a).map(String);
+
+    // Build final query including optional year range on callingDate
+    const query = { ...baseQuery };
+    if (year && year !== 'All Years') {
+      const yearNum = parseInt(year, 10);
+      if (!isNaN(yearNum)) {
+        const start = new Date(`${yearNum}-01-01T00:00:00.000Z`);
+        const end = new Date(`${yearNum + 1}-01-01T00:00:00.000Z`);
+        query.callingDate = { $gte: start, $lt: end };
+      }
+    }
+
     const candidates = await recruitmentCol.find(query).toArray();
     
-    // Filter by experience if provided
+    // Filter by experience if provided (applied on the year-filtered result set)
     let filteredCandidates = candidates;
     if (experience && experience !== 'All Experience') {
-      filteredCandidates = candidates.filter(candidate => {
+      filteredCandidates = filteredCandidates.filter(candidate => {
         const exp = candidate.totalExperience || '';
         const expYears = parseFloat(exp) || 0;
         
@@ -1921,9 +1960,24 @@ router.get('/recruitment/candidates', async (req, res) => {
     const inInterview = transformedCandidates.filter(c => c.status === 'In Interview' || c.status === 'Interview Scheduled' || c.status === 'Interview Aligned').length;
     const hired = transformedCandidates.filter(c => c.status === 'Hired').length;
     const onHold = transformedCandidates.filter(c => c.status === 'On Hold').length;
-    
-    // Recruiter dropdown: fixed list (All Recruiters + Priyanka, Charu, Megha, Harshita)
-    const hrList = ['All Recruiters', ...RECRUITMENT_RECRUITER_NAMES];
+
+    // Recruiter dropdown: dynamic list from HR/recruiter users
+    let hrList = ['All Recruiters'];
+    try {
+      const { getUsersCollection } = require('../../config/mongo');
+      let companyName = company;
+      if (!companyName || companyName === '1' || companyName === 'undefined') {
+        companyName = 'Ecosoul Home';
+      }
+      const usersCol = await getUsersCollection(null, companyName);
+      const employees = await usersCol.find({ role: { $in: ['hr', 'HR', 'recruiter', 'Recruiter'] } }).toArray();
+      const names = employees
+        .map(emp => emp.name || emp.firstName || 'Unknown')
+        .filter(name => name && name !== 'Unknown');
+      hrList = ['All Recruiters', ...Array.from(new Set(names))];
+    } catch (err) {
+      console.error('Error fetching HR list for recruitment candidates:', err);
+    }
     
     res.json({
       success: true,
@@ -1936,7 +1990,8 @@ router.get('/recruitment/candidates', async (req, res) => {
           hired,
           onHold
         },
-        hrList
+        hrList,
+        years
       }
     });
   } catch (error) {
@@ -1977,7 +2032,8 @@ router.get('/recruitment/hiring', async (req, res) => {
       }
     }
     if (recruiter && recruiter !== 'All Recruiters') {
-      query.assignedTo = recruiter;
+      const recruiterRegex = new RegExp(`^${recruiter}$`, 'i');
+      query.assignedTo = recruiterRegex;
     }
     if (search) {
       query.$and = query.$and || [];
@@ -2024,9 +2080,24 @@ router.get('/recruitment/hiring', async (req, res) => {
     const hired = transformedCandidates.filter(c => c.hiringStatus === 'Hired').length;
     const rejected = transformedCandidates.filter(c => c.hiringStatus === 'Rejected').length;
     const awaiting = transformedCandidates.filter(c => c.hiringStatus === 'Awaiting').length;
-    
-    // Recruiter dropdown: fixed list (All Recruiters + Priyanka, Charu, Megha, Harshita)
-    const hrList = ['All Recruiters', ...RECRUITMENT_RECRUITER_NAMES];
+
+    // Recruiter dropdown: dynamic list from HR/recruiter users
+    let hrList = ['All Recruiters'];
+    try {
+      const { getUsersCollection } = require('../../config/mongo');
+      let companyName = company;
+      if (!companyName || companyName === '1' || companyName === 'undefined') {
+        companyName = 'Ecosoul Home';
+      }
+      const usersCol = await getUsersCollection(null, companyName);
+      const employees = await usersCol.find({ role: { $in: ['hr', 'HR', 'recruiter', 'Recruiter'] } }).toArray();
+      const names = employees
+        .map(emp => emp.name || emp.firstName || 'Unknown')
+        .filter(name => name && name !== 'Unknown');
+      hrList = ['All Recruiters', ...Array.from(new Set(names))];
+    } catch (err) {
+      console.error('Error fetching HR list for recruitment hiring:', err);
+    }
     
     res.json({
       success: true,
@@ -2079,7 +2150,8 @@ router.get('/recruitment/onboarding', async (req, res) => {
       query.onboardingStage = stage;
     }
     if (recruiter && recruiter !== 'All Recruiters') {
-      query.assignedTo = recruiter;
+      const recruiterRegex = new RegExp(`^${recruiter}$`, 'i');
+      query.assignedTo = recruiterRegex;
     }
     if (search) {
       query.$and = query.$and || [];
@@ -2150,9 +2222,24 @@ router.get('/recruitment/onboarding', async (req, res) => {
     const offersAccepted = transformedCandidates.filter(c => c.offerStatus === 'Accepted').length;
     const offersDeclined = transformedCandidates.filter(c => c.offerStatus === 'Declined').length;
     const completedOnboardings = transformedCandidates.filter(c => c.onboardingStage === 'Asset' && c.progress === 100).length;
-    
-    // Recruiter dropdown: fixed list (All Recruiters + Priyanka, Charu, Megha, Harshita)
-    const hrList = ['All Recruiters', ...RECRUITMENT_RECRUITER_NAMES];
+
+    // Recruiter dropdown: dynamic list from HR/recruiter users
+    let hrList = ['All Recruiters'];
+    try {
+      const { getUsersCollection } = require('../../config/mongo');
+      let companyName = company;
+      if (!companyName || companyName === '1' || companyName === 'undefined') {
+        companyName = 'Ecosoul Home';
+      }
+      const usersCol = await getUsersCollection(null, companyName);
+      const employees = await usersCol.find({ role: { $in: ['hr', 'HR', 'recruiter', 'Recruiter'] } }).toArray();
+      const names = employees
+        .map(emp => emp.name || emp.firstName || 'Unknown')
+        .filter(name => name && name !== 'Unknown');
+      hrList = ['All Recruiters', ...Array.from(new Set(names))];
+    } catch (err) {
+      console.error('Error fetching HR list for onboarding:', err);
+    }
     
     res.json({
       success: true,
@@ -2775,9 +2862,30 @@ router.post('/recruitment/recruiters', async (req, res) => {
     // Check if email already exists
     const existing = await usersCol.findOne({ email: email.toLowerCase() });
     if (existing) {
-      return res.status(400).json({
-        success: false,
-        error: 'Recruiter with this email already exists'
+      // If a user already exists with this email, update them to be a recruiter
+      const updatedRecruiter = {
+        name: name,
+        firstName: name.split(' ')[0] || name,
+        lastName: name.split(' ').slice(1).join(' ') || '',
+        phone: phone || existing.phone || '',
+        role: role || 'recruiter',
+        status: 'active',
+        updatedAt: new Date()
+      };
+
+      await usersCol.updateOne(
+        { _id: existing._id },
+        { $set: updatedRecruiter }
+      );
+
+      return res.json({
+        success: true,
+        message: 'Recruiter updated successfully',
+        data: {
+          id: existing._id.toString(),
+          email: existing.email,
+          ...updatedRecruiter
+        }
       });
     }
     
