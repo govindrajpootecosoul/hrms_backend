@@ -17,7 +17,9 @@ require('dotenv').config();
 // Change these values to update MongoDB connection across the entire project
 const MONGODB_CONFIG = {
   // MongoDB Server Details
+  //host: process.env.MONGO_HOST || '49.249.157.19',
   host: process.env.MONGO_HOST || '192.168.50.29',
+
   port: parseInt(process.env.MONGO_PORT || '27017'),
   
   // Full URI (if set, will override host:port)
