@@ -38,6 +38,8 @@ const PORTAL_CONFIG = {
 let client;
 let loginDb;
 let employeeDb;
+// Cache for arbitrary database handles (asset-tracker, hrms, etc.)
+const dbCache = new Map();
 let isConnecting = false;
 
 // Check if client is connected and topology is open
@@ -72,6 +74,7 @@ async function ensureConnection() {
       // Reset database references
       loginDb = null;
       employeeDb = null;
+      dbCache.clear();
       
       // Create new connection with smart authentication handling
       let connectionUri = MONGO_URI;
@@ -157,6 +160,15 @@ async function connectMongo(dbName = null) {
     }
     return loginDb;
   } else {
+    // If a specific DB name was provided (e.g. thrive_asset_tracker), use it.
+    if (dbName && dbName !== EMPLOYEE_DB_NAME) {
+      if (!dbCache.has(dbName)) {
+        dbCache.set(dbName, client.db(dbName));
+        console.log(`[mongo] Using database: ${dbName}`);
+      }
+      return dbCache.get(dbName);
+    }
+
     if (!employeeDb) {
       employeeDb = client.db(EMPLOYEE_DB_NAME);
       console.log(`[mongo] Using employee database: ${EMPLOYEE_DB_NAME}`);
@@ -201,6 +213,14 @@ async function getDb(dbName = null) {
     }
     return loginDb;
   } else {
+    // Support arbitrary DB names for other portals/tenants
+    if (dbName && dbName !== EMPLOYEE_DB_NAME) {
+      if (!dbCache.has(dbName)) {
+        dbCache.set(dbName, client.db(dbName));
+      }
+      return dbCache.get(dbName);
+    }
+
     if (!employeeDb) {
       employeeDb = client.db(EMPLOYEE_DB_NAME);
     }
