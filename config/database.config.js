@@ -19,11 +19,12 @@ const MONGODB_CONFIG = {
   // MongoDB Server Details
   //host: process.env.MONGO_HOST || '49.249.157.19',
   host: process.env.MONGO_HOST || '192.168.50.29',
+  //localhost:27017
 
   port: parseInt(process.env.MONGO_PORT || '27017'),
   
-  // Full URI (if set, will override host:port)
-  uri: process.env.MONGO_URI || null,
+  // Full URI (if set, will override host:port) — same fallbacks as frontend lib/config/database.config.js
+  uri: process.env.MONGO_URI || process.env.MONGODB_URI || null,
   
   // Database Names
   // Base database names - will be prefixed with company name (e.g., ecosoul_asset_tracker, thrive_asset_tracker)
@@ -32,7 +33,11 @@ const MONGODB_CONFIG = {
   //   - Ecosoul: ecosoul_asset_tracker, ecosoul_hrms, ecosoul_finance, ecosoul_query_tracker, ecosoul_employee
   //   - Thrive: thrive_asset_tracker, thrive_hrms, thrive_finance, thrive_query_tracker, thrive_employee
   databases: {
-    assetTracker: process.env.ASSET_TRACKER_DB_NAME || 'asset_tracker', // Results in: ecosoul_asset_tracker, thrive_asset_tracker
+    // Align with frontend env: same base name as old direct-Mongo client (MONGO_DB_NAME / MONGODB_DB_NAME)
+    assetTracker:
+      process.env.ASSET_TRACKER_DB_NAME ||
+      process.env.MONGODB_ASSET_DB_NAME ||
+      'asset_tracker',
     login: process.env.MONGO_LOGIN_DB_NAME || 'Employees_List', // Shared database (not company-specific)
     employee: process.env.MONGO_DB_NAME || (process.env.NODE_ENV === 'production' ? 'hrms_prod' : 'Employee'), // Results in: ecosoul_Employee, thrive_Employee
     queryTracker: process.env.QUERY_TRACKER_DB_NAME || 'query_tracker', // Results in: ecosoul_query_tracker, thrive_query_tracker
@@ -99,6 +104,18 @@ function getCompanyFromEmail(email) {
 }
 
 /**
+ * Canonical Mongo company prefix (must match existing DBs — see DATABASE_STRUCTURE.md).
+ * "Ecosoul Home" → ecosoul_asset_tracker, not ecosoul_home_asset_tracker.
+ */
+function normalizeCompanyKey(company) {
+  if (!company || typeof company !== 'string') return '';
+  const t = company.trim().toLowerCase();
+  if (t.includes('thrive')) return 'thrive';
+  if (t.includes('ecosoul') || t.includes('eco soul')) return 'ecosoul';
+  return company.trim().toLowerCase().replace(/\s+/g, '_');
+}
+
+/**
  * Get company-specific database name
  * @param {string} module - Module name: 'assetTracker', 'hrms', 'finance', 'queryTracker', 'employee'
  * @param {string} company - Company name: 'Thrive' or 'Ecosoul Home'
@@ -126,8 +143,7 @@ function getCompanyDatabaseName(module = 'assetTracker', company = null) {
     return baseDbName;
   }
   
-  // Normalize company name (lowercase, replace spaces with underscores)
-  const normalizedCompany = company.toLowerCase().replace(/\s+/g, '_');
+  const normalizedCompany = normalizeCompanyKey(company);
   
   // Return company-specific database name: {company}_{base_database_name}
   return `${normalizedCompany}_${baseDbName}`;

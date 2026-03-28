@@ -4,6 +4,19 @@ const router = express.Router();
 const { connectMongo } = require('../../config/mongo');
 const { getCompanyDatabaseName, getDatabaseName, getCollectionName } = require('../../config/database.config');
 
+/** Wrong slug used earlier (full "Ecosoul Home" → ecosoul_home_*); read that DB if canonical DB is empty */
+function getLegacyMistakenEcosoulAssetDbName() {
+  const base = getDatabaseName('assetTracker');
+  return `ecosoul_home_${base}`;
+}
+
+async function fetchAssetsFromDbName(dbName, baseQuery) {
+  const db = await connectMongo(dbName);
+  const col = db.collection(getCollectionName('assets'));
+  const q = Object.keys(baseQuery).length ? baseQuery : {};
+  return col.find(q).sort({ createdAt: -1 }).toArray();
+}
+
 function escapeRegex(value) {
   return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
@@ -116,12 +129,26 @@ router.get('/assets', async (req, res) => {
     let assets = [];
     if (company) {
       assets = await collection.find({}).sort({ createdAt: -1 }).toArray();
+      // Data written while DB name used "ecosoul_home_*" instead of canonical "ecosoul_*"
+      if (assets.length === 0 && company.toLowerCase().includes('ecosoul')) {
+        try {
+          const legacyName = getLegacyMistakenEcosoulAssetDbName();
+          const legacyAssets = await fetchAssetsFromDbName(legacyName, {});
+          if (legacyAssets.length) assets = legacyAssets;
+        } catch (_e) {
+          /* legacy DB may not exist */
+        }
+      }
       if (assets.length === 0) {
         const sharedCollection = await getCollection('assets');
         const sharedQuery = { ...baseQuery, ...buildCompanyFilter(company) };
         assets = await sharedCollection.find(sharedQuery).sort({ createdAt: -1 }).toArray();
         if (!assets.length && companyId) {
           assets = await sharedCollection.find(buildCompanyFilter(company)).sort({ createdAt: -1 }).toArray();
+        }
+        // Old docs in shared DB may only have companyId, not company string
+        if (!assets.length && companyId) {
+          assets = await sharedCollection.find({ companyId }).sort({ createdAt: -1 }).toArray();
         }
       }
     } else {
