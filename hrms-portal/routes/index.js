@@ -60,7 +60,10 @@ async function getHrmsDb(company = null) {
     const { getDatabaseName } = require('../../config/database.config');
     return (await getDb(getDatabaseName('hrms')));
   }
-  const dbName = getCompanyDatabaseName('hrms', company);
+  // Note: Ecosoul HRMS data is stored in legacy DB name "ecosoul_home_hrms".
+  // Thrive continues using canonical DB name from getCompanyDatabaseName().
+  const isEcosoul = String(company).toLowerCase().includes('ecosoul');
+  const dbName = isEcosoul ? 'ecosoul_home_hrms' : getCompanyDatabaseName('hrms', company);
   const { MongoClient } = require('mongodb');
   const { getMongoUri } = require('../../config/app.config');
   const uri = getMongoUri();
@@ -84,7 +87,9 @@ async function getAllHrmsDbs() {
   const companyNames = ['Ecosoul Home', 'Thrive'];
   const dbPromises = companyNames.map(async (companyName) => {
     try {
-      const dbName = getCompanyDatabaseName('hrms', companyName);
+      const dbName = companyName.toLowerCase().includes('ecosoul')
+        ? 'ecosoul_home_hrms'
+        : getCompanyDatabaseName('hrms', companyName);
       const { MongoClient } = require('mongodb');
       const { getMongoUri } = require('../../config/app.config');
       const uri = getMongoUri();
