@@ -202,14 +202,62 @@ router.put('/assets', async (req, res) => {
     const company = updateData.company || body.company || '';
 
     if (!id) return res.status(400).json({ success: false, error: 'Asset ID is required' });
-    const collection = await getCollection('assets', company || null);
-    const prev = await collection.findOne({ id: String(id) });
+    const idStr = String(id);
+    const updatedAt = new Date().toISOString();
 
-    const result = await collection.updateOne(
-      { id: String(id) },
-      { $set: { ...updateData, updatedAt: new Date().toISOString() } }
-    );
-    if (!result.matchedCount) return res.status(404).json({ success: false, error: 'Asset not found' });
+    // In production we have data across:
+    // - company-scoped DB
+    // - legacy ecosoul_home_* DB (older bug)
+    // - shared DB (fallback when company DB empty)
+    //
+    // GET already falls back; PUT must do the same otherwise "Asset not found" happens on updates.
+    const baseMatch = { id: idStr };
+    const baseQuery = {};
+    if (updateData.companyId) baseQuery.companyId = updateData.companyId;
+    const companyFilter = company ? buildCompanyFilter(company) : {};
+
+    const tryUpdateInCollection = async (collection, matchExtra = {}) => {
+      const match = { ...baseMatch, ...matchExtra };
+      const prev = await collection.findOne(match);
+      const result = await collection.updateOne(
+        match,
+        { $set: { ...updateData, updatedAt } }
+      );
+      return { prev, result };
+    };
+
+    // 1) company scoped DB
+    const companyCollection = await getCollection('assets', company || null);
+    let { prev, result } = await tryUpdateInCollection(companyCollection);
+
+    // 2) legacy mistaken ecosoul_home_* DB
+    if (!result?.matchedCount && company && company.toLowerCase().includes('ecosoul')) {
+      try {
+        const legacyDbName = getLegacyMistakenEcosoulAssetDbName();
+        const legacyDb = await connectMongo(legacyDbName);
+        const legacyCol = legacyDb.collection(getCollectionName('assets'));
+        ({ prev, result } = await tryUpdateInCollection(legacyCol));
+      } catch (_e) {
+        // legacy DB may not exist
+      }
+    }
+
+    // 3) shared DB fallback: match by id + (companyId/company) to avoid cross-company updates
+    if (!result?.matchedCount) {
+      const sharedCollection = await getCollection('assets');
+      const sharedExtra = { ...baseQuery, ...companyFilter };
+      ({ prev, result } = await tryUpdateInCollection(sharedCollection, sharedExtra));
+      // Older docs may only have companyId and not company string; retry with just companyId if needed
+      if (!result?.matchedCount && updateData.companyId) {
+        ({ prev, result } = await tryUpdateInCollection(sharedCollection, { companyId: updateData.companyId }));
+      }
+      // Last resort: match only by id in shared DB (kept as final fallback for historical data)
+      if (!result?.matchedCount) {
+        ({ prev, result } = await tryUpdateInCollection(sharedCollection));
+      }
+    }
+
+    if (!result?.matchedCount) return res.status(404).json({ success: false, error: 'Asset not found' });
 
     const prevAssignedTo = prev?.assignedTo || null;
     const nextAssignedTo = updateData.assignedTo ?? prevAssignedTo;
