@@ -1,26 +1,45 @@
 require('dotenv').config();
 
 /**
- * Centralized Application Configuration
- * All IPs, URLs, and Ports are managed here
- * DO NOT hardcode any IPs, URLs, or ports in other files
- * 
- * ⚠️ IMPORTANT: MongoDB configuration is now in config/database.config.js
- * Update MongoDB settings there to apply across all portals
+ * Centralized application configuration — URLs, ports, and DB hosts come from .env only
+ * (no hardcoded host/port defaults in this file).
  */
 
-// Import centralized database configuration
 const { MONGODB_CONFIG, getMongoUri: getDbMongoUri, getDatabaseName, getCollectionName } = require('./database.config');
 
+function requireEnvString(name) {
+  const v = process.env[name];
+  if (v == null || !String(v).trim()) {
+    throw new Error(`${name} must be set in .env file`);
+  }
+  return String(v).trim();
+}
+
+function requireEnvInt(name) {
+  const v = process.env[name];
+  if (v == null || !String(v).trim()) {
+    throw new Error(`${name} must be set in .env file`);
+  }
+  const n = parseInt(v, 10);
+  if (Number.isNaN(n)) {
+    throw new Error(`${name} must be a valid integer`);
+  }
+  return n;
+}
+
+const poolSizeRaw = process.env.DB_POOL_SIZE;
+const poolSize =
+  poolSizeRaw != null && String(poolSizeRaw).trim() !== ''
+    ? parseInt(poolSizeRaw, 10)
+    : 12;
+
 const config = {
-  // Server Ports
   ports: {
-    backend: parseInt(process.env.BACKEND_PORT) || 5008,
-    frontend: parseInt(process.env.FRONTEND_PORT) || 4000,
-    queryTracker: parseInt(process.env.QUERY_TRACKER_PORT) || 5009,
+    backend: requireEnvInt('BACKEND_PORT'),
+    frontend: requireEnvInt('FRONTEND_PORT'),
+    queryTracker: requireEnvInt('QUERY_TRACKER_PORT'),
   },
 
-  // MongoDB Configuration (now uses centralized config)
   mongodb: {
     host: MONGODB_CONFIG.host,
     port: MONGODB_CONFIG.port,
@@ -32,33 +51,26 @@ const config = {
     usersCollection: getCollectionName('users'),
   },
 
-  // MySQL Configuration
   mysql: {
-    host: process.env.DB_HOST || '192.168.50.29',
-    port: parseInt(process.env.DB_PORT) || 3306,
-    user: process.env.DB_USER || 'apiuser',
-    password: process.env.DB_PASSWORD || 'Thrive@2910',
-    database: process.env.DB_NAME || 'worklytics_hrms',
-    poolSize: parseInt(process.env.DB_POOL_SIZE) || 12,
+    host: requireEnvString('DB_HOST'),
+    port: requireEnvInt('DB_PORT'),
+    user: requireEnvString('DB_USER'),
+    password: requireEnvString('DB_PASSWORD'),
+    database: requireEnvString('DB_NAME'),
+    poolSize: Number.isNaN(poolSize) ? 12 : poolSize,
   },
 
-  // Server URLs
   urls: {
-    // Base URLs
-    backendBase: process.env.BACKEND_BASE_URL || null, // Will be constructed if not set
-    frontendBase: process.env.FRONTEND_BASE_URL || null, // Will be constructed if not set
-    
-    // API Endpoints
-    backendApi: process.env.BACKEND_API_URL || null, // Will be constructed if not set
-    healthCheck: process.env.HEALTH_CHECK_URL || null, // Will be constructed if not set
+    backendBase: process.env.BACKEND_BASE_URL || null,
+    frontendBase: process.env.FRONTEND_BASE_URL || null,
+    backendApi: process.env.BACKEND_API_URL || null,
+    healthCheck: process.env.HEALTH_CHECK_URL || null,
   },
 
-  // Network IPs (for external access)
   network: {
-    serverIp: process.env.SERVER_IP || 'localhost', // Server's IP address for network access
+    serverIp: requireEnvString('SERVER_IP'),
   },
 
-  // Environment
   env: {
     nodeEnv: process.env.NODE_ENV || 'development',
     isProduction: process.env.NODE_ENV === 'production',
@@ -66,12 +78,10 @@ const config = {
   },
 };
 
-// Helper function to get MongoDB URI (uses centralized config)
 function getMongoUri(databaseName = null) {
   return getDbMongoUri(databaseName);
 }
 
-// Helper function to get backend URL
 function getBackendUrl() {
   if (config.urls.backendBase) {
     return config.urls.backendBase;
@@ -80,7 +90,6 @@ function getBackendUrl() {
   return `http://${host}:${config.ports.backend}`;
 }
 
-// Helper function to get frontend URL
 function getFrontendUrl() {
   if (config.urls.frontendBase) {
     return config.urls.frontendBase;
@@ -89,7 +98,6 @@ function getFrontendUrl() {
   return `http://${host}:${config.ports.frontend}`;
 }
 
-// Helper function to get API URL
 function getApiUrl() {
   if (config.urls.backendApi) {
     return config.urls.backendApi;
@@ -97,7 +105,6 @@ function getApiUrl() {
   return `${getBackendUrl()}/api`;
 }
 
-// Helper function to get health check URL
 function getHealthCheckUrl() {
   if (config.urls.healthCheck) {
     return config.urls.healthCheck;
@@ -105,7 +112,6 @@ function getHealthCheckUrl() {
   return `${getBackendUrl()}/api/health`;
 }
 
-// Export configuration and helper functions
 module.exports = {
   config,
   getMongoUri,
@@ -113,8 +119,6 @@ module.exports = {
   getFrontendUrl,
   getApiUrl,
   getHealthCheckUrl,
-  
-  // Direct access to commonly used values
   ports: config.ports,
   mongodb: config.mongodb,
   mysql: config.mysql,
@@ -122,4 +126,3 @@ module.exports = {
   network: config.network,
   env: config.env,
 };
-

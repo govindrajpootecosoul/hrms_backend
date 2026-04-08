@@ -1,14 +1,17 @@
 const path = require('path');
 const { ports } = require('./config/app.config');
 
+const backendInstances = Math.max(1, parseInt(process.env.PM2_INSTANCES || '1', 10) || 1);
+const backendExecMode = backendInstances > 1 ? 'cluster' : 'fork';
+
 module.exports = {
   apps: [
     {
       name: 'HRMS-backend',
       script: './server.js',
       cwd: path.resolve(__dirname),
-      instances: 'max',
-      exec_mode: 'cluster',
+      instances: backendInstances,
+      exec_mode: backendExecMode,
       env_production: {
         NODE_ENV: 'production',
         PORT: ports.backend

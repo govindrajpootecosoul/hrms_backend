@@ -1,10 +1,12 @@
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
+const path = require('path');
 const dotenv = require('dotenv');
-const { config, ports, getMongoUri, getBackendUrl } = require('../config/app.config');
 
-dotenv.config();
+dotenv.config({ path: path.join(__dirname, '..', '.env') });
+require('../config/network.config');
+const { config, ports, getMongoUri, getBackendUrl } = require('../config/app.config');
 
 const app = express();
 

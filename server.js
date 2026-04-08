@@ -2,9 +2,9 @@ const express = require('express');
 const cors = require('cors');
 require('dotenv').config();
 
-// Import centralized config
+// Network + env validation before app.config (app.config also requires SERVER_IP, ports, DB, Mongo from .env)
+require('./config/network.config');
 const { config, ports, getMongoUri, getBackendUrl: getAppBackendUrl } = require('./config/app.config');
-// Import network config (single source of truth for network settings)
 const { networkConfig, getBackendUrl, getApiUrl, backendPort } = require('./config/network.config');
 
 // Shared routes (used by all portals)
@@ -35,10 +35,21 @@ app.use(cors({
 }));
 
 // Add request logging middleware for debugging
-app.use((req, res, next) => {
-  console.log(`${new Date().toISOString()} - ${req.method} ${req.path}`);
-  next();
-});
+const ENABLE_REQUEST_LOGS = process.env.REQUEST_LOGS === 'true' || process.env.NODE_ENV !== 'production';
+const REQUEST_LOG_EXCLUDE_PATHS = new Set([
+  '/api/health',
+  '/api/employee/checkin/status',
+]);
+
+if (ENABLE_REQUEST_LOGS) {
+  app.use((req, res, next) => {
+    // Avoid noisy hot-path logs in production/PM2
+    if (!REQUEST_LOG_EXCLUDE_PATHS.has(req.path)) {
+      console.log(`${new Date().toISOString()} - ${req.method} ${req.path}`);
+    }
+    next();
+  });
+}
 
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));

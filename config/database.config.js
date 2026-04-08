@@ -15,15 +15,15 @@ require('dotenv').config();
 // MONGODB CONFIGURATION
 // ============================================
 // Change these values to update MongoDB connection across the entire project
-const MONGODB_CONFIG = {
-  // MongoDB Server Details
-  //host: process.env.MONGO_HOST || '49.249.157.19',
-  host: process.env.MONGO_HOST || '192.168.50.29',
-  //localhost:27017
+const mongoPortRaw = process.env.MONGO_PORT;
+const mongoPortParsed =
+  mongoPortRaw != null && String(mongoPortRaw).trim() !== ''
+    ? parseInt(mongoPortRaw, 10)
+    : NaN;
 
-  port: parseInt(process.env.MONGO_PORT || '27017'),
-  
-  // Full URI (if set, will override host:port) — same fallbacks as frontend lib/config/database.config.js
+const MONGODB_CONFIG = {
+  host: process.env.MONGO_HOST || null,
+  port: mongoPortParsed,
   uri: process.env.MONGO_URI || process.env.MONGODB_URI || null,
   
   // Database Names
@@ -62,6 +62,15 @@ const MONGODB_CONFIG = {
     retryReads: true,
   },
 };
+
+if (
+  !MONGODB_CONFIG.uri &&
+  (!MONGODB_CONFIG.host || Number.isNaN(MONGODB_CONFIG.port))
+) {
+  throw new Error(
+    'MongoDB: set MONGO_URI or MONGODB_URI in .env, or set both MONGO_HOST and MONGO_PORT'
+  );
+}
 
 // ============================================
 // HELPER FUNCTIONS

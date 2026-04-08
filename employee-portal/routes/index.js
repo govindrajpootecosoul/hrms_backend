@@ -148,6 +148,11 @@ const defaultReports = () => ({
   ],
 });
 
+// Very small in-memory cache to reduce DB load for hot polling endpoints.
+// Note: in PM2 cluster mode this cache is per-worker (still helpful).
+const checkinStatusCache = new Map(); // key -> { ts, data }
+const CHECKIN_STATUS_CACHE_TTL_MS = 1000;
+
 // Dashboard data
 router.get('/dashboard', async (req, res) => {
   try {
@@ -383,79 +388,62 @@ router.get('/checkin/status', async (req, res) => {
       return res.status(400).json({ success: false, error: 'Employee ID is required' });
     }
 
+    const cacheKey = `${company || 'default'}:${employeeId}`;
+    const cached = checkinStatusCache.get(cacheKey);
+    const nowTs = Date.now();
+    if (cached && (nowTs - cached.ts) < CHECKIN_STATUS_CACHE_TTL_MS) {
+      return res.json({ success: true, data: cached.data });
+    }
+
     // Get company-specific database
     const db = company ? await getEmployeePortalDb(company) : await getDb();
     const col = db.collection('employee_checkins');
     const today = new Date().toISOString().split('T')[0];
     
-    // Find all today's check-in records to calculate total accumulated time
-    const todayCheckIns = await col.find(
-      { 
-        employeeId, 
-        date: today 
-      }
-    ).sort({ checkInTime: -1 }).toArray(); // Sort by most recent first
+    // We only need the most recent record for today.
+    // The design of this module stores accumulated minutes in `totalMinutes` on the active record.
+    const mostRecentCheckIn = await col
+      .find({ employeeId, date: today })
+      .sort({ checkInTime: -1 })
+      .limit(1)
+      .project({ checkInTime: 1, checkOutTime: 1, totalMinutes: 1, status: 1 })
+      .next();
 
-    if (!todayCheckIns || todayCheckIns.length === 0) {
-      return res.json({ 
-        success: true, 
-        data: {
-          status: 'checked-out',
-          checkInTime: null,
-          checkOutTime: null,
-          totalMinutes: 0,
-          employeeId: employeeId
-        }
-      });
+    if (!mostRecentCheckIn) {
+      const data = {
+        status: 'checked-out',
+        checkInTime: null,
+        checkOutTime: null,
+        totalMinutes: 0,
+        employeeId: employeeId
+      };
+      checkinStatusCache.set(cacheKey, { ts: nowTs, data });
+      return res.json({ success: true, data });
     }
 
-    // Get the most recent check-in (active or last completed)
-    const mostRecentCheckIn = todayCheckIns[0];
-    
-    // Calculate total accumulated minutes from all completed sessions today
-    // Each completed session's totalMinutes already includes all previous sessions
-    // So we just need the maximum totalMinutes from completed sessions
-    let maxCompletedMinutes = 0;
-    todayCheckIns.forEach(record => {
-      if (record.checkOutTime && record.totalMinutes) {
-        // For completed sessions, find the maximum (which is the latest total)
-        if (record.totalMinutes > maxCompletedMinutes) {
-          maxCompletedMinutes = record.totalMinutes;
-        }
-      }
-    });
+    let totalMinutes = mostRecentCheckIn.totalMinutes || 0;
+    let status = mostRecentCheckIn.status || (mostRecentCheckIn.checkOutTime ? 'checked-out' : 'checked-in');
 
-    let totalMinutes = maxCompletedMinutes;
-    let status = mostRecentCheckIn.status || 'checked-out';
-    let currentCheckInTime = null;
-
-    // If checked in but not checked out, calculate current session minutes and add to accumulated
     if (mostRecentCheckIn.checkInTime && !mostRecentCheckIn.checkOutTime) {
       const checkInTime = new Date(mostRecentCheckIn.checkInTime);
       const now = new Date();
       const currentSessionMinutes = Math.max(0, (now.getTime() - checkInTime.getTime()) / 60000);
-      
-      // Total = accumulated from previous sessions (stored in totalMinutes) + current session minutes
-      const baseMinutes = mostRecentCheckIn.totalMinutes || 0;
-      totalMinutes = baseMinutes + currentSessionMinutes;
+      totalMinutes = (mostRecentCheckIn.totalMinutes || 0) + currentSessionMinutes;
       status = 'checked-in';
-      currentCheckInTime = mostRecentCheckIn.checkInTime;
     } else {
-      // If checked out, use the total from the most recent record (which includes all sessions)
-      totalMinutes = mostRecentCheckIn.totalMinutes || 0;
-      currentCheckInTime = mostRecentCheckIn.checkInTime;
+      status = 'checked-out';
     }
 
-    res.json({ 
-      success: true, 
-      data: {
-        status,
-        checkInTime: currentCheckInTime || mostRecentCheckIn.checkInTime || null,
-        checkOutTime: mostRecentCheckIn.checkOutTime || null,
-        totalMinutes: totalMinutes,
-        employeeId: employeeId
-      }
-    });
+    const data = {
+      status,
+      checkInTime: mostRecentCheckIn.checkInTime || null,
+      checkOutTime: mostRecentCheckIn.checkOutTime || null,
+      totalMinutes: totalMinutes,
+      employeeId: employeeId
+    };
+
+    checkinStatusCache.set(cacheKey, { ts: nowTs, data });
+    res.json({ success: true, data });
   } catch (err) {
     console.error('[checkin/status] Error:', err);
     res.status(500).json({ success: false, error: 'Internal server error' });
