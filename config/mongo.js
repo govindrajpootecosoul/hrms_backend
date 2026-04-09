@@ -13,23 +13,23 @@ const USERS_COLLECTION = config.mongodb.usersCollection;
 
 // Portal configuration - defines database and collections for each portal
 const PORTAL_CONFIG = {
-  'hrms-portal': {
+  hrms: {
     database: getDatabaseName('hrms'),
     collections: ['employees', 'attendance', 'leaves', 'departments', 'designations', 'recruitment', 'leave_policies']
   },
-  'asset-tracker-portal': {
+  assets: {
     database: getDatabaseName('assetTracker'),
     collections: ['assets', 'asset_categories', 'asset_assignments', 'asset_history', 'companies']
   },
-  'finance-portal': {
+  finance: {
     database: getDatabaseName('finance'),
     collections: ['invoices', 'transactions', 'expenses', 'budgets', 'financial_reports']
   },
-  'employee-portal': {
+  employee: {
     database: getDatabaseName('employee'),
     collections: ['dashboard', 'requests', 'announcements', 'documents', 'payroll', 'attendance_requests', 'employee_checkins']
   },
-  'query-tracker-portal': {
+  'query-tracker': {
     database: getDatabaseName('queryTracker'),
     collections: ['queries', 'users', 'reports'] // Note: query-tracker has its own setup
   }
@@ -276,7 +276,7 @@ async function getUsersCollection(email = null, company = null) {
 
 /**
  * Initialize database and collections for a specific portal
- * @param {string} portalName - Portal name (e.g., 'hrms-portal', 'asset-tracker-portal')
+ * @param {string} portalName - Portal key from PORTAL_CONFIG (e.g. 'hrms', 'assets')
  * @returns {Promise<void>}
  */
 async function initializePortalDatabase(portalName) {

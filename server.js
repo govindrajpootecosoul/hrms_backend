@@ -7,16 +7,14 @@ require('./config/network.config');
 const { config, ports, getMongoUri, getBackendUrl: getAppBackendUrl } = require('./config/app.config');
 const { networkConfig, getBackendUrl, getApiUrl, backendPort } = require('./config/network.config');
 
-// Shared routes (used by all portals)
-const authRoutes = require('./shared/routes/auth');
-const adminUsersRoutes = require('./shared/routes/admin-users');
-
-// Portal-specific routes
-const hrmsRoutes = require('./hrms-portal/routes');
-const assetTrackerRoutes = require('./asset-tracker-portal/routes');
-const financeRoutes = require('./finance-portal/routes');
-const employeeRoutes = require('./employee-portal/routes');
-const queryTrackerRoutes = require('./query-tracker-portal/routes');
+// Portals (see /portals/<name>/app.js — shared config/ and this server.js at repo root)
+const { authRoutes, adminUsersRoutes } = require('./portals/admin-portal/app');
+const hrmsAdminRoutes = require('./portals/hrms-admin/app');
+const hrmsRoutes = require('./portals/hrms/app');
+const assetTrackerRoutes = require('./portals/assets/app');
+const financeRoutes = require('./portals/finance/app');
+const employeeRoutes = require('./portals/employee/app');
+const queryTrackerRoutes = require('./portals/query-tracker/app');
 
 // MySQL auto-setup disabled - using MongoDB only
 // const autoSetupDatabase = require('./utils/autoSetup');
@@ -54,12 +52,19 @@ if (ENABLE_REQUEST_LOGS) {
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
-// Shared Routes (used by all portals)
+// Admin portal (auth + admin users)
 app.use('/api/auth', authRoutes);
 app.use('/api/admin-users', adminUsersRoutes);
 
-// Portal-specific Routes
-app.use('/api/hrms', hrmsRoutes);
+// HRMS: admin surface first, then main HRMS API
+const mountHrms = () => {
+  app.use('/api/hrms', hrmsAdminRoutes);
+  app.use('/api/hrms', hrmsRoutes);
+  // Legacy frontend paths use /api/hrms-portal/* — same handlers
+  app.use('/api/hrms-portal', hrmsAdminRoutes);
+  app.use('/api/hrms-portal', hrmsRoutes);
+};
+mountHrms();
 app.use('/api/asset-tracker', assetTrackerRoutes);
 app.use('/api/finance', financeRoutes);
 app.use('/api/employee', employeeRoutes);

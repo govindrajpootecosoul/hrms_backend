@@ -1,0 +1,16 @@
+const express = require('express');
+const router = express.Router();
+
+const c = require('../controllers/adminUsersController');
+
+router.get('/', c.listUsers);
+router.get('/departments/list', c.listDepartments);
+router.get('/:id', c.getUserById);
+router.post('/', c.createUser);
+router.put('/:id', c.updateUser);
+router.delete('/:id', c.deleteUser);
+router.patch('/:id/toggle-active', c.toggleActive);
+router.get('/debug/info', c.debugInfo);
+router.patch('/:id/portals', c.updatePortals);
+
+module.exports = router;

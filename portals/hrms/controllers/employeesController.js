@@ -1,0 +1,82 @@
+const { connectMongo } = require('../../../config/mongo');
+const {
+  getCompanyFromRequest,
+  normalizeCompany,
+  requireCompany,
+  getHrmsDb,
+  getAllHrmsDbs,
+  getEmployeeDbForHrms,
+} = require('../utils/hrmsContext');
+
+async function listEmployees(req, res) {
+  try {
+    const company = requireCompany(req, res);
+    if (!company) return;
+    await connectMongo();
+    const { search, department, status } = req.query;
+    
+    const { getUsersCollection } = require('../../../config/mongo');
+    let usersCol;
+    try {
+      usersCol = await getUsersCollection(null, company);
+    } catch (err) {
+      console.error(`[employees] Error getting employees for ${company}:`, err);
+      return res.status(500).json({ success: false, error: 'Failed to load employees for this company.' });
+    }
+    
+    // Build query
+    const query = {};
+    
+    if (search) {
+      query.$or = [
+        { name: { $regex: search, $options: 'i' } },
+        { employeeId: { $regex: search, $options: 'i' } },
+        { email: { $regex: search, $options: 'i' } }
+      ];
+    }
+    
+    if (department) {
+      query.department = department;
+    }
+    
+    if (status) {
+      query.status = status;
+    }
+    
+    // Fetch employees
+    const employees = await usersCol.find(query).toArray();
+    
+    // Transform to frontend format
+    const formattedEmployees = employees.map(emp => ({
+      id: emp._id.toString(),
+      employeeId: emp.employeeId || emp.email?.split('@')[0] || 'N/A',
+      name: emp.name || emp.firstName || 'Unknown',
+      email: emp.email || '',
+      department: emp.department || 'General',
+      designation: emp.designation || emp.role || 'Employee',
+      status: emp.status || 'active',
+      phone: emp.phone || emp.mobile || '',
+      joiningDate: emp.joiningDate || emp.createdAt || null,
+      location: emp.location || '',
+      biometricId: emp.biometricId || emp.employeeId || ''
+    }));
+    
+    res.json({
+      success: true,
+      data: {
+        employees: formattedEmployees,
+        total: formattedEmployees.length
+      }
+    });
+  } catch (error) {
+    console.error('HRMS employees error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Internal server error'
+    });
+  }
+}
+
+module.exports = {
+  listEmployees,
+};
