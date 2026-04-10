@@ -13,16 +13,18 @@ Write-Host "Local IP: $ipAddress" -ForegroundColor Green
 Write-Host ""
 
 # Test MongoDB Connection
-Write-Host "[2/5] Testing MongoDB connection (192.168.50.107:27017)..." -ForegroundColor Yellow
-try {
-    $mongoTest = Test-NetConnection -ComputerName localhost -Port 27017 -WarningAction SilentlyContinue
-    if ($mongoTest.TcpTestSucceeded) {
-        Write-Host "✓ MongoDB port is open" -ForegroundColor Green
-    } else {
-        Write-Host "✗ MongoDB port is closed" -ForegroundColor Red
+Write-Host "[2/5] Testing MongoDB (main_db layer :27012, Ecosoul :27013, Thrive :27014 on localhost)..." -ForegroundColor Yellow
+foreach ($p in @(27012, 27013, 27014)) {
+    try {
+        $mongoTest = Test-NetConnection -ComputerName localhost -Port $p -WarningAction SilentlyContinue
+        if ($mongoTest.TcpTestSucceeded) {
+            Write-Host "✓ MongoDB port $p open" -ForegroundColor Green
+        } else {
+            Write-Host "✗ MongoDB port $p closed" -ForegroundColor Red
+        }
+    } catch {
+        Write-Host "✗ MongoDB port $p test failed: $_" -ForegroundColor Red
     }
-} catch {
-    Write-Host "✗ MongoDB connection test failed: $_" -ForegroundColor Red
 }
 Write-Host ""
 

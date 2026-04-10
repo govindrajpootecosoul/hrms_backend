@@ -2,6 +2,18 @@ const mysql = require('mysql2/promise');
 require('dotenv').config();
 const { config } = require('./app.config');
 
+if (!config.mysql.host || !config.mysql.user || !config.mysql.database) {
+  // Mongo-first setup: MySQL is optional. Export a stub so legacy imports don't crash.
+  const stub = {};
+  stub.isConnected = () => false;
+  stub.getConnectionError = () => new Error('MySQL disabled: DB_* env vars not set');
+  stub.getConnection = async () => {
+    throw new Error('MySQL disabled: DB_* env vars not set');
+  };
+  module.exports = stub;
+  return;
+}
+
 const DB_CONFIG = {
   host: config.mysql.host,
   port: config.mysql.port,

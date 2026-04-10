@@ -2,13 +2,11 @@ require('dotenv').config();
 
 /**
  * CENTRALIZED DATABASE CONFIGURATION
- * 
- * ⚠️ IMPORTANT: Change MongoDB connection details here and it will update across ALL portals
- * 
- * This file is the single source of truth for database connections.
- * All MongoDB connections in the project should use this configuration.
- * 
- * To change MongoDB connection, edit the values below.
+ *
+ * Three mongod targets (localhost):
+ * 1) LOGIN / main_db layer — port 27012 (MONGO_HOST+MONGO_PORT or MONGO_URI). Holds MONGO_LOGIN_DB_NAME + users collection.
+ * 2) ECOSOUL portal data — default mongodb://localhost:27013
+ * 3) THRIVE portal data — default mongodb://localhost:27014
  */
 
 // ============================================
@@ -24,6 +22,7 @@ const mongoPortParsed =
 const MONGODB_CONFIG = {
   host: process.env.MONGO_HOST || null,
   port: mongoPortParsed,
+  // MAIN Mongo (login DB) URI
   uri: process.env.MONGO_URI || process.env.MONGODB_URI || null,
   
   // Database Names
@@ -38,7 +37,8 @@ const MONGODB_CONFIG = {
       process.env.ASSET_TRACKER_DB_NAME ||
       process.env.MONGODB_ASSET_DB_NAME ||
       'asset_tracker',
-    login: process.env.MONGO_LOGIN_DB_NAME || 'Employees_List', // Shared database (not company-specific)
+    // Shared login DB (not company-specific)
+    login: process.env.MONGO_LOGIN_DB_NAME || 'main_db',
     employee: process.env.MONGO_DB_NAME || (process.env.NODE_ENV === 'production' ? 'hrms_prod' : 'Employee'), // Results in: ecosoul_Employee, thrive_Employee
     queryTracker: process.env.QUERY_TRACKER_DB_NAME || 'query_tracker', // Results in: ecosoul_query_tracker, thrive_query_tracker
     hrms: process.env.HRMS_DB_NAME || 'hrms', // Results in: ecosoul_hrms, thrive_hrms
@@ -48,7 +48,8 @@ const MONGODB_CONFIG = {
   // Collection Names
   collections: {
     assets: 'assets',
-    users: process.env.MONGO_USERS_COLLECTION || 'users',
+    // Auth + employees live here
+    users: process.env.MONGO_USERS_COLLECTION || 'employee_details',
   },
   
   // Connection Options
@@ -63,18 +64,48 @@ const MONGODB_CONFIG = {
   },
 };
 
+// If no URI and no host/port in .env, assume login mongod on localhost:27012 (main_db layer).
 if (
   !MONGODB_CONFIG.uri &&
   (!MONGODB_CONFIG.host || Number.isNaN(MONGODB_CONFIG.port))
 ) {
-  throw new Error(
-    'MongoDB: set MONGO_URI or MONGODB_URI in .env, or set both MONGO_HOST and MONGO_PORT'
-  );
+  MONGODB_CONFIG.host = 'localhost';
+  MONGODB_CONFIG.port = 27012;
 }
 
 // ============================================
 // HELPER FUNCTIONS
 // ============================================
+
+function firstNonEmptyEnvUri(...names) {
+  for (const name of names) {
+    const v = process.env[name];
+    if (v != null && String(v).trim() !== '') {
+      return String(v).trim().replace(/\/$/, '');
+    }
+  }
+  return null;
+}
+
+/** Default Mongo bases: main/login (main_db layer) :27012, Ecosoul :27013, Thrive :27014 */
+const DEFAULT_MONGO_MAIN = 'mongodb://localhost:27012';
+const DEFAULT_MONGO_ECOSOUL = 'mongodb://localhost:27013';
+const DEFAULT_MONGO_THRIVE = 'mongodb://localhost:27014';
+
+/**
+ * Base connection string for the main/login Mongo client.
+ * Order: MONGO_URI_MAIN → MONGO_URI / MONGODB_URI → MONGO_HOST+MONGO_PORT → localhost:27012
+ */
+function getMainMongoBaseRaw() {
+  return (
+    firstNonEmptyEnvUri('MONGO_URI_MAIN') ||
+    MONGODB_CONFIG.uri ||
+    (MONGODB_CONFIG.host && !Number.isNaN(MONGODB_CONFIG.port)
+      ? `mongodb://${MONGODB_CONFIG.host}:${MONGODB_CONFIG.port}`
+      : null) ||
+    DEFAULT_MONGO_MAIN
+  );
+}
 
 /**
  * Get MongoDB connection URI
@@ -120,8 +151,8 @@ function normalizeCompanyKey(company) {
   if (!company || typeof company !== 'string') return '';
   const t = company.trim().toLowerCase();
   if (t.includes('thrive')) return 'thrive';
-  if (t.includes('ecosoul') || t.includes('eco soul')) return 'ecosoul';
-  return company.trim().toLowerCase().replace(/\s+/g, '_');
+  if (t.includes('ecosoul') || t.includes('eco soul')) return 'Ecosoul Home';
+  return company.trim();
 }
 
 /**
@@ -144,18 +175,30 @@ function getCompanyDatabaseName(module = 'assetTracker', company = null) {
   if (module === 'login') {
     return MONGODB_CONFIG.databases.login;
   }
-  
-  const baseDbName = MONGODB_CONFIG.databases[module] || MONGODB_CONFIG.databases.assetTracker;
-  
-  // If no company specified, return base database name
-  if (!company) {
-    return baseDbName;
-  }
-  
-  const normalizedCompany = normalizeCompanyKey(company);
-  
-  // Return company-specific database name: {company}_{base_database_name}
-  return `${normalizedCompany}_${baseDbName}`;
+
+  // New multi-mongo setup: each company has its own Mongo server,
+  // and each portal stores collections inside the company DB.
+  if (!company) return null;
+  return normalizeCompanyKey(company);
+}
+
+function getMongoUriMain(databaseName = null) {
+  const base = getMainMongoBaseRaw();
+  const separator = base.endsWith('/') ? '' : '/';
+  return databaseName ? `${base}${separator}${databaseName}` : base;
+}
+
+/**
+ * Per-company Mongo base. Defaults: Ecosoul → localhost:27013, Thrive → localhost:27014 (not main’s port).
+ */
+function getMongoUriForCompany(company, databaseName = null) {
+  const key = normalizeCompanyKey(company);
+  const base =
+    key === 'thrive'
+      ? firstNonEmptyEnvUri('MONGO_URI_THRIVE') || DEFAULT_MONGO_THRIVE
+      : firstNonEmptyEnvUri('MONGO_URI_ECOSOUL') || DEFAULT_MONGO_ECOSOUL;
+  const separator = base.endsWith('/') ? '' : '/';
+  return databaseName ? `${base}${separator}${databaseName}` : base;
 }
 
 /**
@@ -180,6 +223,8 @@ function getCollectionName(collection = 'assets') {
 module.exports = {
   MONGODB_CONFIG,
   getMongoUri,
+  getMongoUriMain,
+  getMongoUriForCompany,
   getDatabaseName,
   getCompanyDatabaseName,
   getCompanyFromEmail,

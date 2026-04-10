@@ -8,14 +8,40 @@ const {
   getEmployeeDbForHrms,
 } = require('../utils/hrmsContext');
 
+/** `dateRange` may be Date, object, or string — .split only exists on strings */
+function splitDateRangeParts(dateRange) {
+  if (dateRange == null || dateRange === '') return null;
+  const s = typeof dateRange === 'string' ? dateRange : String(dateRange);
+  const parts = s.split(' - ');
+  return parts.length === 2 ? parts : null;
+}
+
+/** Express can give string[] for duplicate query keys — use first value */
+function firstQueryValue(val, fallback) {
+  if (val == null || val === '') return fallback;
+  const v = Array.isArray(val) ? val[0] : val;
+  const s = String(v).trim();
+  return s || fallback;
+}
+
+function isValidDate(d) {
+  return d instanceof Date && !Number.isNaN(d.getTime());
+}
+
+function parseCheckTime(value) {
+  if (value == null || value === '') return null;
+  const d = value instanceof Date ? value : new Date(value);
+  return isValidDate(d) ? d : null;
+}
+
 async function listAttendance(req, res) {
   try {
     const companyName = requireCompany(req, res);
     if (!companyName) return;
     await connectMongo();
-    
-    const date = req.query.date || new Date().toISOString().split('T')[0]; // Default to today
-    const department = req.query.department || 'all';
+
+    const date = firstQueryValue(req.query.date, new Date().toISOString().split('T')[0]);
+    const department = firstQueryValue(req.query.department, 'all');
     
     // Get employee database where check-ins are stored (use normalized company)
     const db = await getEmployeeDbForHrms(companyName);
@@ -43,27 +69,29 @@ async function listAttendance(req, res) {
     if (checkIns.length === 0) {
       try {
         const todayDate = new Date(date);
-        const startOfDay = new Date(todayDate);
-        startOfDay.setHours(0, 0, 0, 0);
-        const endOfDay = new Date(todayDate);
-        endOfDay.setHours(23, 59, 59, 999);
-        
-        console.log(`[attendance] Trying alternative query by checkInTime range: ${startOfDay.toISOString()} to ${endOfDay.toISOString()}`);
-        const alternativeQuery = {
-          checkInTime: {
-            $gte: startOfDay,
-            $lte: endOfDay
-          }
-        };
-        checkIns = await col.find(alternativeQuery).sort({ checkInTime: -1 }).toArray();
-        console.log(`[attendance] Found ${checkIns.length} check-ins using checkInTime range query (company DB)`);
+        if (!isValidDate(todayDate)) {
+          console.warn('[attendance] Invalid date query, skipping checkInTime range fallback:', date);
+        } else {
+          const startOfDay = new Date(todayDate);
+          startOfDay.setHours(0, 0, 0, 0);
+          const endOfDay = new Date(todayDate);
+          endOfDay.setHours(23, 59, 59, 999);
+          const alternativeQuery = {
+            checkInTime: {
+              $gte: startOfDay,
+              $lte: endOfDay,
+            },
+          };
+          checkIns = await col.find(alternativeQuery).sort({ checkInTime: -1 }).toArray();
+          console.log(`[attendance] Found ${checkIns.length} check-ins using checkInTime range query (company DB)`);
+        }
       } catch (e) {
         console.error('[attendance] Alternative query by checkInTime failed:', e);
       }
     }
     
-    // Get all employees to map employeeId to employee details
-    const allEmployees = await usersCol.find({}).toArray();
+    // Get only this company's employees (employee_details lives in main_db)
+    const allEmployees = await usersCol.find({ company: companyName }).toArray();
     const employeeMap = new Map();
     allEmployees.forEach(emp => {
       const empId = emp.employeeId || emp.email?.split('@')[0] || '';
@@ -77,9 +105,11 @@ async function listAttendance(req, res) {
     });
 
     // Transform data for frontend
-    const attendanceRecords = checkIns.map(record => {
-      const checkInTime = record.checkInTime ? new Date(record.checkInTime) : null;
-      const checkOutTime = record.checkOutTime ? new Date(record.checkOutTime) : null;
+    const attendanceRecords = checkIns
+      .filter((record) => record && record._id != null)
+      .map((record) => {
+      const checkInTime = parseCheckTime(record.checkInTime);
+      const checkOutTime = parseCheckTime(record.checkOutTime);
       
       // Get employee details from map
       const employeeInfo = employeeMap.get(record.employeeId) || {
@@ -140,7 +170,8 @@ async function listAttendance(req, res) {
     console.error('HRMS attendance error:', error);
     res.status(500).json({
       success: false,
-      error: 'Internal server error'
+      error:
+        process.env.NODE_ENV === 'development' ? error.message || 'Internal server error' : 'Internal server error',
     });
   }
 }
@@ -150,7 +181,7 @@ async function attendanceStats(req, res) {
     const effectiveCompany = requireCompany(req, res);
     if (!effectiveCompany) return;
     await connectMongo();
-    const date = req.query.date || new Date().toISOString().split('T')[0];
+    const date = firstQueryValue(req.query.date, new Date().toISOString().split('T')[0]);
     
     const db = await getEmployeeDbForHrms(effectiveCompany);
     let col = db.collection('employee_checkins');
@@ -161,7 +192,8 @@ async function attendanceStats(req, res) {
     let employeesList = [];
     try {
       const usersCol = await getUsersCollection(null, companyName);
-      employeesList = await usersCol.find({}).toArray();
+      // IMPORTANT: employee_details is in main_db, but must be filtered by company
+      employeesList = await usersCol.find({ company: companyName }).toArray();
       totalEmployees = employeesList.length;
       console.log(`[attendance/stats] Total employees: ${totalEmployees} for company: ${companyName}`);
     } catch (err) {
@@ -230,20 +262,22 @@ async function attendanceStats(req, res) {
     if (todayCheckIns.length === 0) {
       try {
         const todayDate = new Date(date);
-        const startOfDay = new Date(todayDate);
-        startOfDay.setHours(0, 0, 0, 0);
-        const endOfDay = new Date(todayDate);
-        endOfDay.setHours(23, 59, 59, 999);
-        
-        console.log(`[attendance/stats] Trying alternative query by checkInTime range: ${startOfDay.toISOString()} to ${endOfDay.toISOString()}`);
-        const alternativeQuery = {
-          checkInTime: {
-            $gte: startOfDay,
-            $lte: endOfDay
-          }
-        };
-        todayCheckIns = await col.find(alternativeQuery).toArray();
-        console.log(`[attendance/stats] Found ${todayCheckIns.length} check-in records using checkInTime range query (company DB)`);
+        if (!isValidDate(todayDate)) {
+          console.warn('[attendance/stats] Invalid date, skipping checkInTime range fallback:', date);
+        } else {
+          const startOfDay = new Date(todayDate);
+          startOfDay.setHours(0, 0, 0, 0);
+          const endOfDay = new Date(todayDate);
+          endOfDay.setHours(23, 59, 59, 999);
+          const alternativeQuery = {
+            checkInTime: {
+              $gte: startOfDay,
+              $lte: endOfDay,
+            },
+          };
+          todayCheckIns = await col.find(alternativeQuery).toArray();
+          console.log(`[attendance/stats] Found ${todayCheckIns.length} check-in records using checkInTime range query (company DB)`);
+        }
       } catch (e) {
         console.error('[attendance/stats] Alternative query by checkInTime failed:', e);
       }
@@ -269,9 +303,9 @@ async function attendanceStats(req, res) {
     
     const onLeaveEmployees = new Set();
     approvedLeaves.forEach(leave => {
-      if (leave.dateRange) {
-        const parts = leave.dateRange.split(' - ');
-        if (parts.length === 2) {
+      const rangeParts = splitDateRangeParts(leave.dateRange);
+      if (rangeParts) {
+        const parts = rangeParts;
           try {
             // Parse dates - handle both "YYYY-MM-DD" and "DD MMM YYYY" formats
             let fromDateStr = parts[0].trim();
@@ -313,7 +347,6 @@ async function attendanceStats(req, res) {
           } catch (e) {
             console.error('[attendance/stats] Error parsing leave date range:', leave.dateRange, e);
           }
-        }
       }
     });
     const onLeaveCount = onLeaveEmployees.size;
@@ -370,11 +403,11 @@ async function attendanceStats(req, res) {
       ...(companyName ? { company: companyName } : {})
     };
     const wfhRequests = await requestsCol.find(wfhRequestsQuery).toArray();
-    wfhRequests.forEach(req => {
-      if (req.dateRange) {
-        const parts = req.dateRange.split(' - ');
-        if (parts.length === 2) {
-          try {
+    wfhRequests.forEach((wfhReq) => {
+      const wfhParts = splitDateRangeParts(wfhReq.dateRange);
+      if (wfhParts) {
+        const parts = wfhParts;
+        try {
             const fromDate = new Date(parts[0].trim());
             const toDate = new Date(parts[1].trim());
             const todayDate = new Date(todayDateStr);
@@ -384,7 +417,7 @@ async function attendanceStats(req, res) {
             todayDate.setHours(0, 0, 0, 0);
             
             if (todayDate >= fromDate && todayDate <= toDate) {
-              const reqEmpId = req.employeeId;
+              const reqEmpId = wfhReq.employeeId;
               let normalizedId = employeeIdMap.get(reqEmpId);
               if (!normalizedId) {
                 const matchingEmp = employeesList.find(emp => {
@@ -402,9 +435,8 @@ async function attendanceStats(req, res) {
               console.log(`[attendance/stats] Found WFH request for employee: ${reqEmpId} (normalized: ${normalizedId})`);
             }
           } catch (e) {
-            console.error('[attendance/stats] Error parsing WFH request date range:', req.dateRange, e);
+            console.error('[attendance/stats] Error parsing WFH request date range:', wfhReq.dateRange, e);
           }
-        }
       }
     });
     
@@ -508,7 +540,8 @@ async function attendanceStats(req, res) {
     console.error('HRMS attendance stats error:', error);
     res.status(500).json({
       success: false,
-      error: 'Internal server error'
+      error:
+        process.env.NODE_ENV === 'development' ? error.message || 'Internal server error' : 'Internal server error',
     });
   }
 }

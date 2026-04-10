@@ -52,11 +52,11 @@ const config = {
   },
 
   mysql: {
-    host: requireEnvString('DB_HOST'),
-    port: requireEnvInt('DB_PORT'),
-    user: requireEnvString('DB_USER'),
-    password: requireEnvString('DB_PASSWORD'),
-    database: requireEnvString('DB_NAME'),
+    host: process.env.DB_HOST ? String(process.env.DB_HOST).trim() : null,
+    port: process.env.DB_PORT ? parseInt(process.env.DB_PORT, 10) : null,
+    user: process.env.DB_USER ? String(process.env.DB_USER).trim() : null,
+    password: process.env.DB_PASSWORD ? String(process.env.DB_PASSWORD).trim() : null,
+    database: process.env.DB_NAME ? String(process.env.DB_NAME).trim() : null,
     poolSize: Number.isNaN(poolSize) ? 12 : poolSize,
   },
 

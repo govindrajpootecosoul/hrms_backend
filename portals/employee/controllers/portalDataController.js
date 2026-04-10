@@ -1,4 +1,3 @@
-﻿const { connectMongo } = require('../../../config/mongo');
 const { getCompanyFromRequest } = require('../utils/employeeContext');
 const { getOrCreateDoc } = require('../services/getOrCreateDoc');
 const { defaultDashboard, defaultAttendance, defaultRequests, defaultOrg, defaultReports } = require('../services/defaults');
@@ -12,9 +11,9 @@ const {
 
 async function getDashboard(req, res) {
   try {
-    await connectMongo();
     const employeeId = req.query.employeeId || 'default';
     const company = getCompanyFromRequest(req);
+    if (!company) return res.status(400).json({ success: false, error: 'company is required' });
     const doc = await getOrCreateDoc(PORTAL_DASHBOARD, { employeeId }, defaultDashboard(employeeId), company);
     return res.json({ success: true, data: doc });
   } catch (err) {
@@ -25,9 +24,9 @@ async function getDashboard(req, res) {
 
 async function getAttendance(req, res) {
   try {
-    await connectMongo();
     const employeeId = req.query.employeeId || 'default';
     const company = getCompanyFromRequest(req);
+    if (!company) return res.status(400).json({ success: false, error: 'company is required' });
     const doc = await getOrCreateDoc(PORTAL_ATTENDANCE, { employeeId }, defaultAttendance(employeeId), company);
     return res.json({ success: true, data: doc });
   } catch (err) {
@@ -38,9 +37,9 @@ async function getAttendance(req, res) {
 
 async function getRequests(req, res) {
   try {
-    await connectMongo();
     const employeeId = req.query.employeeId || 'default';
     const company = getCompanyFromRequest(req);
+    if (!company) return res.status(400).json({ success: false, error: 'company is required' });
     const doc = await getOrCreateDoc(PORTAL_REQUESTS, { employeeId }, defaultRequests(employeeId), company);
     return res.json({ success: true, data: doc });
   } catch (err) {
@@ -51,8 +50,8 @@ async function getRequests(req, res) {
 
 async function getOrg(req, res) {
   try {
-    await connectMongo();
     const company = getCompanyFromRequest(req);
+    if (!company) return res.status(400).json({ success: false, error: 'company is required' });
     const doc = await getOrCreateDoc(PORTAL_ORG, { key: 'org' }, defaultOrg(), company);
     return res.json({ success: true, data: doc });
   } catch (err) {
@@ -63,8 +62,8 @@ async function getOrg(req, res) {
 
 async function getReports(req, res) {
   try {
-    await connectMongo();
     const company = getCompanyFromRequest(req);
+    if (!company) return res.status(400).json({ success: false, error: 'company is required' });
     const doc = await getOrCreateDoc(PORTAL_REPORTS, { key: 'reports' }, defaultReports(), company);
     return res.json({ success: true, data: doc });
   } catch (err) {

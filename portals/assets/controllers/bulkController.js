@@ -1,5 +1,6 @@
 const XLSX = require('xlsx');
-const { connectMongo } = require('../../../config/mongo');
+const { connectMongo, initializeCompanyPortals } = require('../../../config/mongo');
+const { getTenantCompanyFromRequest } = require('../../../config/tenantCompany');
 const { getCompanyDatabaseName, getDatabaseName, getCollectionName } = require('../../../config/database.config');
 
 /** Wrong slug used earlier (full "Ecosoul Home" → ecosoul_home_*); read that DB if canonical DB is empty */
@@ -108,9 +109,16 @@ function defaultLocations() {
 async function bulkUpsertAssets(req, res) {
   try {
     const assets = Array.isArray(req.body.assets) ? req.body.assets : null;
-    const company = req.body.company || null;
+    const company = getTenantCompanyFromRequest(req) || req.body.company || null;
     if (!assets || assets.length === 0) {
       return res.status(400).json({ success: false, error: 'Assets array is required' });
+    }
+    if (company) {
+      try {
+        await initializeCompanyPortals(company);
+      } catch (e) {
+        console.warn('[asset-tracker] initializeCompanyPortals:', e.message);
+      }
     }
     const collection = await getCollection('assets', company);
     const assetsWithTimestamps = assets.map((asset) => ({

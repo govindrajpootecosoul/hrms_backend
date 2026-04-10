@@ -1,56 +1,29 @@
 const XLSX = require('xlsx');
 const { connectMongo } = require('../../../config/mongo');
-const { getCompanyDatabaseName, getDatabaseName, getCollectionName } = require('../../../config/database.config');
-
-/** Wrong slug used earlier (full "Ecosoul Home" → ecosoul_home_*); read that DB if canonical DB is empty */
-function getLegacyMistakenEcosoulAssetDbName() {
-  const base = getDatabaseName('assetTracker');
-  return `ecosoul_home_${base}`;
-}
-
-async function fetchAssetsFromDbName(dbName, baseQuery) {
-  const db = await connectMongo(dbName);
-  const col = db.collection(getCollectionName('assets'));
-  const q = Object.keys(baseQuery).length ? baseQuery : {};
-  return col.find(q).sort({ createdAt: -1 }).toArray();
-}
+const { getCollectionName } = require('../../../config/database.config');
 
 function escapeRegex(value) {
   return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-async function getAssetDb(company = null) {
-  const dbName = company ? getCompanyDatabaseName('assetTracker', company) : getDatabaseName('assetTracker');
-  return connectMongo(dbName);
+async function getAssetDb(company) {
+  if (!company) {
+    throw new Error('company is required');
+  }
+  // Company DB lives on company-specific Mongo server
+  return connectMongo(company);
 }
 
-async function getCollection(collectionKey, company = null) {
+async function getCollection(collectionKey, company) {
   const db = await getAssetDb(company);
   return db.collection(getCollectionName(collectionKey));
 }
 
-function buildCompanyFilter(companyName) {
-  if (!companyName) return {};
-  const normalized = companyName.trim().toLowerCase();
-  if (normalized.includes('thrive')) {
-    return { $or: [{ company: { $regex: /thrive/i } }, { company: { $regex: /thrivebrands/i } }] };
-  }
-  if (normalized.includes('ecosoul') || normalized.includes('eco soul')) {
-    return { $or: [{ company: { $regex: /ecosoul/i } }, { company: { $regex: /eco\s*soul/i } }] };
-  }
-  const escaped = escapeRegex(companyName);
-  const flexibleSpacing = escaped.replace(/\s+/g, '\\s*');
-  return {
-    $or: [
-      { company: companyName },
-      { company: { $regex: new RegExp(`^${flexibleSpacing}$`, 'i') } },
-      { company: { $regex: new RegExp(flexibleSpacing, 'i') } },
-    ],
-  };
-}
+// buildCompanyFilter was used for shared-db fallbacks. Company DB is now required.
 
 async function logAssetHistory(entry, company = null) {
   try {
+    if (!company) return;
     const historyCollection = await getCollection('asset_history', company);
     await historyCollection.insertOne({ ...entry, createdAt: new Date().toISOString() });
   } catch (err) {
@@ -111,7 +84,10 @@ async function getAssets(req, res) {
     const company = String(req.query.company || '').trim();
     const id = req.query.id;
 
-    const collection = await getCollection('assets', company || null);
+    if (!company) {
+      return res.status(400).json({ success: false, error: 'company is required' });
+    }
+    const collection = await getCollection('assets', company);
 
     if (id) {
       const deleted = await collection.deleteOne({ id: String(id) });
@@ -124,34 +100,7 @@ async function getAssets(req, res) {
     const baseQuery = {};
     if (companyId) baseQuery.companyId = companyId;
 
-    let assets = [];
-    if (company) {
-      assets = await collection.find({}).sort({ createdAt: -1 }).toArray();
-      // Data written while DB name used "ecosoul_home_*" instead of canonical "ecosoul_*"
-      if (assets.length === 0 && company.toLowerCase().includes('ecosoul')) {
-        try {
-          const legacyName = getLegacyMistakenEcosoulAssetDbName();
-          const legacyAssets = await fetchAssetsFromDbName(legacyName, {});
-          if (legacyAssets.length) assets = legacyAssets;
-        } catch (_e) {
-          /* legacy DB may not exist */
-        }
-      }
-      if (assets.length === 0) {
-        const sharedCollection = await getCollection('assets');
-        const sharedQuery = { ...baseQuery, ...buildCompanyFilter(company) };
-        assets = await sharedCollection.find(sharedQuery).sort({ createdAt: -1 }).toArray();
-        if (!assets.length && companyId) {
-          assets = await sharedCollection.find(buildCompanyFilter(company)).sort({ createdAt: -1 }).toArray();
-        }
-        // Old docs in shared DB may only have companyId, not company string
-        if (!assets.length && companyId) {
-          assets = await sharedCollection.find({ companyId }).sort({ createdAt: -1 }).toArray();
-        }
-      }
-    } else {
-      assets = await collection.find(baseQuery).sort({ createdAt: -1 }).toArray();
-    }
+    const assets = await collection.find(baseQuery).sort({ createdAt: -1 }).toArray();
 
     return res.json({ success: true, data: assets, count: assets.length });
   } catch (error) {
@@ -164,7 +113,8 @@ async function createAsset(req, res) {
   try {
     const body = req.body || {};
     const company = body.company || '';
-    const collection = await getCollection('assets', company || null);
+    if (!company) return res.status(400).json({ success: false, error: 'company is required' });
+    const collection = await getCollection('assets', company);
     const asset = {
       ...body,
       status: body.status && String(body.status).trim() ? body.status : 'available',
@@ -200,7 +150,8 @@ async function updateAsset(req, res) {
     const company = updateData.company || body.company || '';
 
     if (!id) return res.status(400).json({ success: false, error: 'Asset ID is required' });
-    const collection = await getCollection('assets', company || null);
+    if (!company) return res.status(400).json({ success: false, error: 'company is required' });
+    const collection = await getCollection('assets', company);
     const prev = await collection.findOne({ id: String(id) });
 
     const result = await collection.updateOne(
@@ -248,8 +199,9 @@ async function deleteAsset(req, res) {
     const id = req.query.id;
     const company = req.query.company || '';
     if (!id) return res.status(400).json({ success: false, error: 'Asset ID is required' });
+    if (!company) return res.status(400).json({ success: false, error: 'company is required' });
 
-    const collection = await getCollection('assets', company || null);
+    const collection = await getCollection('assets', company);
     const prev = await collection.findOne({ id: String(id) });
     const result = await collection.deleteOne({ id: String(id) });
     if (!result.deletedCount) return res.status(404).json({ success: false, error: 'Asset not found' });
@@ -280,8 +232,9 @@ async function getAssetDetail(req, res) {
     const companyId = req.query.companyId;
     const company = req.query.company;
     if (!assetId) return res.status(400).json({ success: false, error: 'Asset ID is required' });
+    if (!company) return res.status(400).json({ success: false, error: 'company is required' });
 
-    const collection = await getCollection('assets', company || null);
+    const collection = await getCollection('assets', company);
     const query = {
       $or: [
         { id: String(assetId) },

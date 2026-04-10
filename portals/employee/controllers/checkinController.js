@@ -1,13 +1,19 @@
-﻿const { connectMongo } = require('../../../config/mongo');
 const { getCompanyFromRequest } = require('../utils/employeeContext');
 const { checkinStatusCache, CHECKIN_STATUS_CACHE_TTL_MS } = require('../utils/employeeContext');
 const { checkinEmployee, checkoutEmployee, getTodayStatus, getHistory } = require('../services/checkinService');
+const { initializeCompanyPortals } = require('../../../config/mongo');
 
 async function checkin(req, res) {
   try {
-    await connectMongo();
     const { employeeId } = req.body;
     const company = getCompanyFromRequest(req);
+    if (!company) return res.status(400).json({ success: false, error: 'company is required' });
+
+    try {
+      await initializeCompanyPortals(company);
+    } catch (e) {
+      console.warn('[checkin] initializeCompanyPortals:', e.message);
+    }
 
     const data = await checkinEmployee({ employeeId, company });
     res.json({ success: true, message: 'Checked in successfully', data });
@@ -23,9 +29,15 @@ async function checkin(req, res) {
 
 async function checkout(req, res) {
   try {
-    await connectMongo();
     const { employeeId } = req.body;
     const company = getCompanyFromRequest(req);
+    if (!company) return res.status(400).json({ success: false, error: 'company is required' });
+
+    try {
+      await initializeCompanyPortals(company);
+    } catch (e) {
+      console.warn('[checkout] initializeCompanyPortals:', e.message);
+    }
 
     const data = await checkoutEmployee({ employeeId, company });
     res.json({ success: true, message: 'Checked out successfully', data });
@@ -41,9 +53,9 @@ async function checkout(req, res) {
 
 async function getCheckinStatus(req, res) {
   try {
-    await connectMongo();
     const employeeId = req.query.employeeId;
     const company = getCompanyFromRequest(req);
+    if (!company) return res.status(400).json({ success: false, error: 'company is required' });
 
     const data = await getTodayStatus({
       employeeId,
@@ -64,10 +76,10 @@ async function getCheckinStatus(req, res) {
 
 async function getCheckinHistory(req, res) {
   try {
-    await connectMongo();
     const employeeId = req.query.employeeId;
     const limit = parseInt(req.query.limit, 10) || 30;
     const company = getCompanyFromRequest(req);
+    if (!company) return res.status(400).json({ success: false, error: 'company is required' });
 
     const data = await getHistory({ employeeId, company, limit });
     res.json({ success: true, data });

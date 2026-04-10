@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const bcrypt = require('bcryptjs');
 const { ObjectId } = require('mongodb');
-const { connectMongo, getUsersCollection, LOGIN_DB_NAME } = require('../../../config/mongo');
+const { getUsersCollection, LOGIN_DB_NAME } = require('../../../config/mongo');
 
 /**
  * Check if a user is a dummy/test user
@@ -82,15 +82,11 @@ async function listUsers(req, res) {
       });
     }
     
-    let usersCol;
-    let collectionName;
-    usersCol = await getUsersCollection(null, resolvedCompany);
-    collectionName = resolvedCompany.toLowerCase().includes('thrive') ? 'Thrive_Employees' : 'Ecosoul_Employees';
-    
-    const query = {};
+    const usersCol = await getUsersCollection();
+    const query = { company: resolvedCompany };
     const allUsers = await usersCol.find(query).toArray();
     
-    console.log(`[admin-users] Fetched ${allUsers.length} total users from ${collectionName} collection in ${LOGIN_DB_NAME} database for company: ${resolvedCompany}`);
+    console.log(`[admin-users] Fetched ${allUsers.length} users from employee_details in ${LOGIN_DB_NAME} for company: ${resolvedCompany}`);
     
     // By default, show ALL users. Only filter if explicitly requested
     let usersToReturn = allUsers;
@@ -138,6 +134,8 @@ async function listUsers(req, res) {
       location: user.location || '',
       reportingManager: user.reportingManager || '',
       joiningDate: user.joiningDate || '',
+      card_no: user.card_no || '',
+      emp_code: user.emp_code || '',
       
       // Bank & Insurance
       bankAccount: user.bankAccount || '',
@@ -169,8 +167,8 @@ async function listUsers(req, res) {
       total: transformedUsers.length,
       filtered: dummyCount,
       database: LOGIN_DB_NAME, // Show which database was used
-      collection: collectionName || 'users',
-      message: `Fetched ${transformedUsers.length} users from ${collectionName || 'users'} collection in ${LOGIN_DB_NAME} database`
+      collection: 'employee_details',
+      message: `Fetched ${transformedUsers.length} users from employee_details in ${LOGIN_DB_NAME} database`
     });
   } catch (error) {
     console.error('[Admin Users GET Error]', error);
@@ -312,7 +310,9 @@ async function getUserById(req, res) {
         department: user.department || '',
         company: user.company || '',
         hasCredentialAccess: user.hasCredentialAccess !== false,
-        hasSubscriptionAccess: user.hasSubscriptionAccess !== false
+        hasSubscriptionAccess: user.hasSubscriptionAccess !== false,
+        card_no: user.card_no || '',
+        emp_code: user.emp_code || ''
       }
     });
   } catch (error) {
@@ -337,7 +337,7 @@ async function createUser(req, res) {
       // Personal details
       phone, dateOfBirth, gender, address, city, state, zipCode, emergencyContact, emergencyPhone,
       // Work details
-      jobTitle, location, reportingManager, joiningDate,
+      jobTitle, location, reportingManager, joiningDate, card_no, emp_code,
       // Bank & Insurance
       bankAccount, ifsc, pan, aadhaar, uan, esiNo, pfNo
     } = req.body;
@@ -420,6 +420,8 @@ async function createUser(req, res) {
       location: location || '',
       reportingManager: reportingManager || '',
       joiningDate: joiningDate || '',
+      card_no: card_no || '',
+      emp_code: emp_code || '',
       
       // Bank & Insurance
       bankAccount: bankAccount || '',
@@ -487,6 +489,8 @@ async function createUser(req, res) {
         location: newUser.location,
         reportingManager: newUser.reportingManager,
         joiningDate: newUser.joiningDate,
+        card_no: newUser.card_no,
+        emp_code: newUser.emp_code,
         bankAccount: newUser.bankAccount,
         ifsc: newUser.ifsc,
         pan: newUser.pan,
@@ -519,7 +523,7 @@ async function updateUser(req, res) {
       // Personal details
       phone, dateOfBirth, gender, address, city, state, zipCode, emergencyContact, emergencyPhone,
       // Work details
-      jobTitle, location, reportingManager, joiningDate,
+      jobTitle, location, reportingManager, joiningDate, card_no, emp_code,
       // Bank & Insurance
       bankAccount, ifsc, pan, aadhaar, uan, esiNo, pfNo
     } = req.body;
@@ -616,6 +620,8 @@ async function updateUser(req, res) {
     if (location !== undefined) updateData.location = location;
     if (reportingManager !== undefined) updateData.reportingManager = reportingManager;
     if (joiningDate !== undefined) updateData.joiningDate = joiningDate;
+    if (card_no !== undefined) updateData.card_no = card_no;
+    if (emp_code !== undefined) updateData.emp_code = emp_code;
     
     // Bank & Insurance - Only update if provided
     if (bankAccount !== undefined) updateData.bankAccount = bankAccount;
@@ -651,7 +657,9 @@ async function updateUser(req, res) {
         department: updatedUser.department || '',
         company: updatedUser.company || '',
         hasCredentialAccess: updatedUser.hasCredentialAccess !== false,
-        hasSubscriptionAccess: updatedUser.hasSubscriptionAccess !== false
+        hasSubscriptionAccess: updatedUser.hasSubscriptionAccess !== false,
+        card_no: updatedUser.card_no || '',
+        emp_code: updatedUser.emp_code || ''
       }
     });
   } catch (error) {

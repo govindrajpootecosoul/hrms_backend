@@ -129,35 +129,18 @@ async function startServer() {
     console.log('   Server will start, but MongoDB features may not work until connection is established');
   }
   
-  // Connect to Query Tracker database
-  try {
-    const mongoose = require('mongoose');
-    const queryTrackerUri = getMongoUri(config.mongodb.queryTrackerDbName);
-    
-    if (mongoose.connection.readyState === 0) {
-      await mongoose.connect(queryTrackerUri, {
-        useNewUrlParser: true,
-        useUnifiedTopology: true
-      });
-      console.log(`✅ Query Tracker database connected: ${config.mongodb.queryTrackerDbName}`);
-    } else {
-      console.log(`✅ Query Tracker database already connected`);
-    }
-  } catch (err) {
-    console.error('⚠️  Query Tracker database connection warning:', err.message);
-    console.log('   Query Tracker features may not work until connection is established');
-  }
-  
+  // Query Tracker: mongoose connects per company in middleware (no global DB at startup).
+
   // Start server
   // Listen on all interfaces (0.0.0.0) to allow network access
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`🚀 Server running on ${getBackendUrl()}`);
     console.log(`   Network IP: ${networkConfig.serverIp}`);
     console.log(`   Port: ${PORT}`);
-    console.log(`📝 Using MongoDB for employee portal and authentication`);
-    console.log(`   Login DB: ${config.mongodb.loginDbName}`);
-    console.log(`   Employee Portal DB: ${config.mongodb.employeeDbName}`);
-    console.log(`   Query Tracker DB: ${config.mongodb.queryTrackerDbName}`);
+    console.log(`📝 MongoDB: main/login mongod default :27012; Ecosoul :27013; Thrive :27014 (override with MONGO_HOST / MONGO_URI_*)`);
+    console.log(`   Login DB: ${config.mongodb.loginDbName} / ${config.mongodb.usersCollection}`);
+    console.log(`   Company portal data: DB name per company on MONGO_URI_ECOSOUL / MONGO_URI_THRIVE (defaults :27013 / :27014)`);
+    console.log(`   (Legacy env names MONGO_DB_NAME / QUERY_TRACKER_DB_NAME etc. no longer select separate DBs per module — company DB holds all portal collections.)`);
   });
 }
 

@@ -1,11 +1,12 @@
 const { MongoClient } = require('mongodb');
-const { config, getMongoUri } = require('./app.config');
-const { MONGODB_CONFIG, getDatabaseName } = require('./database.config');
+const { config } = require('./app.config');
+const { getDatabaseName, getMongoUriMain, getMongoUriForCompany } = require('./database.config');
+const { getTenantCompanyFromRequest } = require('./tenantCompany');
 
 // MongoDB connection URI - supports both dev and production
 // If MONGO_URI is set, use it. Otherwise, use non-authenticated connection
 // (Authentication can be enabled later via environment variable)
-const MONGO_URI = getMongoUri();
+const MAIN_MONGO_URI = getMongoUriMain();
 
 const LOGIN_DB_NAME = config.mongodb.loginDbName;
 const EMPLOYEE_DB_NAME = config.mongodb.employeeDbName;
@@ -14,167 +15,142 @@ const USERS_COLLECTION = config.mongodb.usersCollection;
 // Portal configuration - defines database and collections for each portal
 const PORTAL_CONFIG = {
   hrms: {
-    database: getDatabaseName('hrms'),
     collections: ['employees', 'attendance', 'leaves', 'departments', 'designations', 'recruitment', 'leave_policies']
   },
   assets: {
-    database: getDatabaseName('assetTracker'),
     collections: ['assets', 'asset_categories', 'asset_assignments', 'asset_history', 'companies']
   },
   finance: {
-    database: getDatabaseName('finance'),
     collections: ['invoices', 'transactions', 'expenses', 'budgets', 'financial_reports']
   },
   employee: {
-    database: getDatabaseName('employee'),
-    collections: ['dashboard', 'requests', 'announcements', 'documents', 'payroll', 'attendance_requests', 'employee_checkins']
+    collections: [
+      'portal_dashboard',
+      'portal_attendance',
+      'portal_requests',
+      'portal_org',
+      'portal_reports',
+      'attendance_requests',
+      'employee_checkins',
+    ],
   },
   'query-tracker': {
-    database: getDatabaseName('queryTracker'),
     collections: ['queries', 'users', 'reports'] // Note: query-tracker has its own setup
   }
 };
 
-let client;
+const clients = new Map(); // key -> MongoClient
+const dbCache = new Map(); // `${key}:${dbName}` -> Db
 let loginDb;
-let employeeDb;
-// Cache for arbitrary database handles (asset-tracker, hrms, etc.)
-const dbCache = new Map();
 let isConnecting = false;
 
 // Check if client is connected and topology is open
-function isClientConnected() {
-  return client && client.topology && client.topology.isConnected();
+function isClientConnected(c) {
+  return c && c.topology && c.topology.isConnected();
 }
 
-// Reconnect if connection is closed
-async function ensureConnection() {
-  if (!client || !isClientConnected()) {
-    if (isConnecting) {
-      // Wait for ongoing connection attempt
-      let attempts = 0;
-      while (isConnecting && attempts < 50) {
-        await new Promise(resolve => setTimeout(resolve, 100));
-        attempts++;
-      }
-      if (isClientConnected()) return;
+function getMongoUriForKey(key) {
+  if (key === 'main') return MAIN_MONGO_URI;
+  if (key === 'thrive') return getMongoUriForCompany('Thrive');
+  return getMongoUriForCompany('Ecosoul Home');
+}
+
+function getClientKeyForDb(dbName) {
+  if (!dbName || dbName === LOGIN_DB_NAME) return 'main';
+  const t = String(dbName).trim().toLowerCase();
+  if (t === 'thrive') return 'thrive';
+  if (t.includes('ecosoul')) return 'ecosoul';
+  return 'main';
+}
+
+/**
+ * Normalize user-facing company names to valid MongoDB database names.
+ * MongoDB namespaces cannot contain spaces (e.g. "Ecosoul Home.employee_checkins" is invalid).
+ *
+ * Canonical company DBs in this project:
+ * - Thrive        -> "thrive"
+ * - Ecosoul Home  -> "ecosoul"
+ */
+function normalizeCompanyDbName(dbName) {
+  if (!dbName) return dbName;
+  const raw = String(dbName).trim();
+  if (!raw) return raw;
+  const t = raw.toLowerCase();
+  if (t === LOGIN_DB_NAME.toLowerCase()) return LOGIN_DB_NAME;
+  if (t === 'thrive' || t.includes('thrive')) return 'thrive';
+  if (t === 'ecosoul' || t.includes('ecosoul') || t.includes('eco soul')) return 'ecosoul';
+  return raw;
+}
+
+async function ensureClient(key) {
+  const existing = clients.get(key);
+  if (existing && isClientConnected(existing)) return existing;
+
+  if (isConnecting) {
+    let attempts = 0;
+    while (isConnecting && attempts < 50) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      attempts++;
     }
-    
-    isConnecting = true;
-    try {
-      // Close existing client if it exists
-      if (client) {
-        try {
-          await client.close();
-        } catch (err) {
-          // Ignore close errors
-        }
-      }
-      
-      // Reset database references
-      loginDb = null;
-      employeeDb = null;
-      dbCache.clear();
-      
-      // Create new connection with smart authentication handling
-      let connectionUri = MONGO_URI;
-      
-      // Check if URI contains credentials but we should try without first
-      // If MONGO_URI env var is explicitly set, use it as-is
-      // Otherwise, use non-auth connection
-      const hasExplicitUri = process.env.MONGO_URI;
-      const hasCredentials = connectionUri.includes('@') && connectionUri.includes(':');
-      
-      // If credentials are in URI but not explicitly set via env, try without auth first
-      if (hasCredentials && !hasExplicitUri) {
-        // Remove credentials from URI
-        connectionUri = connectionUri.replace(/mongodb:\/\/[^@]+@/, 'mongodb://');
-      }
-      
+    const maybe = clients.get(key);
+    if (maybe && isClientConnected(maybe)) return maybe;
+  }
+
+  isConnecting = true;
+  try {
+    if (existing) {
       try {
-        client = new MongoClient(connectionUri, {
-          maxPoolSize: 10,
-          connectTimeoutMS: 15008,
-          serverSelectionTimeoutMS: 15008,
-          socketTimeoutMS: 45008,
-          heartbeatFrequencyMS: 10000,
-          retryWrites: true,
-          retryReads: true,
-        });
-        
-        await client.connect();
-        const authStatus = hasCredentials && hasExplicitUri ? ' (with authentication)' : ' (without authentication)';
-        console.log(`✅ [mongo] Connected to MongoDB${authStatus}`);
-      } catch (connectError) {
-        // If connection fails and we have credentials in original URI, try with credentials
-        if (hasCredentials && !hasExplicitUri && connectError.message && !connectError.message.includes('Authentication')) {
-          console.warn(`⚠️  [mongo] Connection failed, trying with authentication...`);
-          
-          if (client) {
-            try {
-              await client.close();
-            } catch (e) {}
-          }
-          
-          // Try with original URI that has credentials
-          const authUri = MONGO_URI;
-          try {
-            client = new MongoClient(authUri, {
-              maxPoolSize: 10,
-              connectTimeoutMS: 10000,
-              serverSelectionTimeoutMS: 10000,
-              socketTimeoutMS: 45008,
-              heartbeatFrequencyMS: 10000,
-            });
-            
-            await client.connect();
-            console.log(`✅ [mongo] Connected to MongoDB (with authentication)`);
-          } catch (authError) {
-            console.error(`❌ [mongo] Connection failed: ${authError.message}`);
-            throw authError;
-          }
-        } else {
-          console.error(`❌ [mongo] Connection failed: ${connectError.message}`);
-          throw connectError;
-        }
-      }
-    } catch (err) {
-      console.error(`❌ [mongo] Reconnection failed: ${err.message}`);
-      throw err;
-    } finally {
-      isConnecting = false;
+        await existing.close();
+      } catch (_e) {}
     }
+
+    // Clear cached db handles for this client key
+    for (const cacheKey of Array.from(dbCache.keys())) {
+      if (cacheKey.startsWith(`${key}:`)) dbCache.delete(cacheKey);
+    }
+
+    const uri = getMongoUriForKey(key);
+    const client = new MongoClient(uri, {
+      maxPoolSize: 10,
+      connectTimeoutMS: 15008,
+      serverSelectionTimeoutMS: 15008,
+      socketTimeoutMS: 45008,
+      heartbeatFrequencyMS: 10000,
+      retryWrites: true,
+      retryReads: true,
+    });
+    await client.connect();
+    clients.set(key, client);
+    console.log(`✅ [mongo] Connected to MongoDB (${key})`);
+    return client;
+  } finally {
+    isConnecting = false;
   }
 }
 
-async function connectMongo(dbName = null) {
-  // Ensure connection is active
-  await ensureConnection();
+async function ensureConnection() {
+  await ensureClient('main');
+}
 
-  const targetDb = dbName || EMPLOYEE_DB_NAME;
-  
+async function connectMongo(dbName = null) {
+  const targetDb = normalizeCompanyDbName(dbName || EMPLOYEE_DB_NAME);
+  const key = getClientKeyForDb(targetDb);
+  const client = await ensureClient(key);
+
   if (targetDb === LOGIN_DB_NAME) {
     if (!loginDb) {
       loginDb = client.db(LOGIN_DB_NAME);
       console.log(`[mongo] Using login database: ${LOGIN_DB_NAME}`);
     }
     return loginDb;
-  } else {
-    // If a specific DB name was provided (e.g. thrive_asset_tracker), use it.
-    if (dbName && dbName !== EMPLOYEE_DB_NAME) {
-      if (!dbCache.has(dbName)) {
-        dbCache.set(dbName, client.db(dbName));
-        console.log(`[mongo] Using database: ${dbName}`);
-      }
-      return dbCache.get(dbName);
-    }
-
-    if (!employeeDb) {
-      employeeDb = client.db(EMPLOYEE_DB_NAME);
-      console.log(`[mongo] Using employee database: ${EMPLOYEE_DB_NAME}`);
-    }
-    return employeeDb;
   }
+
+  const cacheKey = `${key}:${targetDb}`;
+  if (!dbCache.has(cacheKey)) {
+    dbCache.set(cacheKey, client.db(targetDb));
+    console.log(`[mongo] Using database (${key}): ${targetDb}`);
+  }
+  return dbCache.get(cacheKey);
 }
 
 /**
@@ -183,49 +159,16 @@ async function connectMongo(dbName = null) {
  * @returns {Promise<Db>} Company-specific database
  */
 async function getEmployeePortalDb(company = null) {
-  await ensureConnection();
-  
   if (!company) {
-    // Default to base employee database if no company specified
-    if (!employeeDb) {
-      employeeDb = client.db(EMPLOYEE_DB_NAME);
-    }
-    return employeeDb;
+    return connectMongo(EMPLOYEE_DB_NAME);
   }
   
-  // Get company-specific database name
-  const { getCompanyDatabaseName } = require('./database.config');
-  const companyDbName = getCompanyDatabaseName('employee', company);
-  
-  // Return company-specific database
-  return client.db(companyDbName);
+  // Company portal data is stored in company DB on its own Mongo server
+  return connectMongo(company);
 }
 
 async function getDb(dbName = null) {
-  // Ensure connection before getting database
-  await ensureConnection();
-  
-  const targetDb = dbName || EMPLOYEE_DB_NAME;
-  
-  if (targetDb === LOGIN_DB_NAME) {
-    if (!loginDb) {
-      loginDb = client.db(LOGIN_DB_NAME);
-    }
-    return loginDb;
-  } else {
-    // Support arbitrary DB names for other portals/tenants
-    if (dbName && dbName !== EMPLOYEE_DB_NAME) {
-      if (!dbCache.has(dbName)) {
-        dbCache.set(dbName, client.db(dbName));
-      }
-      return dbCache.get(dbName);
-    }
-
-    if (!employeeDb) {
-      employeeDb = client.db(EMPLOYEE_DB_NAME);
-    }
-    return employeeDb;
-  }
+  return connectMongo(dbName || EMPLOYEE_DB_NAME);
 }
 
 /**
@@ -234,43 +177,9 @@ async function getDb(dbName = null) {
  * @param {string} company - Company name: 'Thrive' or 'Ecosoul Home' (optional)
  * @returns {string} Collection name (Thrive_Employees or Ecosoul_Employees)
  */
-function getEmployeeCollectionName(email = null, company = null) {
-  // If company name is provided, use it directly
-  if (company) {
-    const companyLower = company.toLowerCase();
-    if (companyLower.includes('thrive')) {
-      return 'Thrive_Employees';
-    } else if (companyLower.includes('ecosoul')) {
-      return 'Ecosoul_Employees';
-    }
-  }
-  
-  // If email is provided, determine from email domain
-  if (email) {
-    const emailLower = email.toLowerCase();
-    
-    if (emailLower.endsWith('@thrivebrands.ai')) {
-      return 'Thrive_Employees';
-    } else if (emailLower.endsWith('@ecosoulhome.com')) {
-      return 'Ecosoul_Employees';
-    }
-  }
-  
-  // If neither provided, throw error
-  throw new Error('Either email or company name is required to determine collection');
-}
-
 async function getUsersCollection(email = null, company = null) {
-  // For login, use the configured login database (Employees_List)
+  // For login/users, use the configured login database (main_db)
   const db = await getDb(LOGIN_DB_NAME);
-  
-  // If email or company is provided, determine collection based on domain or company name
-  if (email || company) {
-    const collectionName = getEmployeeCollectionName(email, company);
-    return db.collection(collectionName);
-  }
-  
-  // Default to users collection if no email/company provided (for backward compatibility)
   return db.collection(USERS_COLLECTION);
 }
 
@@ -281,53 +190,149 @@ async function getUsersCollection(email = null, company = null) {
  */
 async function initializePortalDatabase(portalName) {
   try {
-    await ensureConnection();
-    
     const portalConfig = PORTAL_CONFIG[portalName];
     if (!portalConfig) {
       console.warn(`⚠️  [portal-setup] No configuration found for portal: ${portalName}`);
       return;
     }
-
     const dbName = portalConfig.database;
-    const collections = portalConfig.collections;
-
-    // Get or create database (MongoDB creates databases automatically when first collection is created)
-    const db = client.db(dbName);
-    
-    // Check existing collections
-    const existingCollections = await db.listCollections().toArray();
-    const existingCollectionNames = existingCollections.map(col => col.name);
-    
-    // Create collections that don't exist
-    for (const collectionName of collections) {
-      if (!existingCollectionNames.includes(collectionName)) {
-        try {
-          // Create collection by inserting an empty document and then deleting it
-          // This ensures the collection exists
-          const collection = db.collection(collectionName);
-          await collection.insertOne({ _initialized: true, createdAt: new Date() });
-          await collection.deleteOne({ _initialized: true });
-          console.log(`✅ [portal-setup] Created collection '${collectionName}' in database '${dbName}'`);
-        } catch (err) {
-          // If insert fails, try creating collection directly
-          try {
-            await db.createCollection(collectionName);
-            console.log(`✅ [portal-setup] Created collection '${collectionName}' in database '${dbName}'`);
-          } catch (createErr) {
-            console.error(`❌ [portal-setup] Failed to create collection '${collectionName}': ${createErr.message}`);
-          }
-        }
-      } else {
-        console.log(`ℹ️  [portal-setup] Collection '${collectionName}' already exists in database '${dbName}'`);
-      }
-    }
-    
-    console.log(`✅ [portal-setup] Portal '${portalName}' database '${dbName}' initialized with ${collections.length} collections`);
+    throw new Error('initializePortalDatabase now requires a database name. Use initializePortalDatabaseForDb(portal, dbName).');
   } catch (error) {
     console.error(`❌ [portal-setup] Failed to initialize portal '${portalName}': ${error.message}`);
     throw error;
   }
+}
+
+/**
+ * Initialize collections for a portal inside a specific DB.
+ * In the new setup, dbName is typically company DB (e.g., "Ecosoul Home" or "thrive").
+ */
+async function initializePortalDatabaseForDb(portalName, dbName, options = {}) {
+  const quiet = options.quiet === true;
+  try {
+    const portalConfig = PORTAL_CONFIG[portalName];
+    if (!portalConfig) {
+      console.warn(`⚠️  [portal-setup] No configuration found for portal: ${portalName}`);
+      return;
+    }
+    const collections = portalConfig.collections;
+
+    const db = await connectMongo(dbName);
+
+    const existingCollections = await db.listCollections().toArray();
+    const existingCollectionNames = existingCollections.map(col => col.name);
+
+    for (const collectionName of collections) {
+      if (!existingCollectionNames.includes(collectionName)) {
+        try {
+          const collection = db.collection(collectionName);
+          await collection.insertOne({ _initialized: true, createdAt: new Date() });
+          await collection.deleteOne({ _initialized: true });
+          if (!quiet) {
+            console.log(`✅ [portal-setup] Created collection '${collectionName}' in database '${dbName}'`);
+          }
+        } catch (err) {
+          try {
+            await db.createCollection(collectionName);
+            if (!quiet) {
+              console.log(`✅ [portal-setup] Created collection '${collectionName}' in database '${dbName}'`);
+            }
+          } catch (createErr) {
+            console.error(`❌ [portal-setup] Failed to create collection '${collectionName}': ${createErr.message}`);
+          }
+        }
+      } else if (!quiet) {
+        console.log(`ℹ️  [portal-setup] Collection '${collectionName}' already exists in database '${dbName}'`);
+      }
+    }
+
+    if (!quiet) {
+      console.log(`✅ [portal-setup] Portal '${portalName}' database '${dbName}' initialized with ${collections.length} collections`);
+    }
+  } catch (error) {
+    console.error(`❌ [portal-setup] Failed to initialize portal '${portalName}': ${error.message}`);
+    throw error;
+  }
+}
+
+/** Canonical company DB name on Mongo (matches connectMongo / getClientKeyForDb). */
+function resolveCompanyDbName(company) {
+  if (company == null || String(company).trim() === '') return null;
+  const t = String(company).trim().toLowerCase();
+  if (t.includes('thrive')) return 'Thrive';
+  if (t.includes('ecosoul') || t.includes('eco soul')) return 'Ecosoul Home';
+  return String(company).trim();
+}
+
+/** All unique collection names required on a company database (all portals). */
+function getAllRequiredCompanyCollectionNames() {
+  const names = new Set();
+  for (const portal of Object.values(PORTAL_CONFIG)) {
+    for (const c of portal.collections) names.add(c);
+  }
+  return Array.from(names).sort();
+}
+
+/**
+ * After login/signup: ensure every required collection exists on that company’s Mongo DB.
+ * One listCollections + create missing only (quiet when nothing was created).
+ */
+async function ensureCollectionsForCompanyDb(company) {
+  const dbName = resolveCompanyDbName(company);
+  if (!dbName) return { dbName: null, created: [], skipped: true };
+
+  const db = await connectMongo(dbName);
+  const existingNames = new Set((await db.listCollections().toArray()).map((c) => c.name));
+  const required = getAllRequiredCompanyCollectionNames();
+  const created = [];
+
+  for (const collectionName of required) {
+    if (existingNames.has(collectionName)) continue;
+    try {
+      await db.createCollection(collectionName);
+      created.push(collectionName);
+    } catch (_e) {
+      try {
+        const col = db.collection(collectionName);
+        await col.insertOne({ _initialized: true, createdAt: new Date() });
+        await col.deleteOne({ _initialized: true });
+        created.push(collectionName);
+      } catch (e2) {
+        console.error(`❌ [portal-setup] Could not create collection '${collectionName}' in '${dbName}': ${e2.message}`);
+      }
+    }
+  }
+
+  if (created.length > 0) {
+    console.log(
+      `✅ [portal-setup] Company DB '${dbName}': created ${created.length} missing collection(s): ${created.join(', ')}`
+    );
+  }
+
+  return { dbName, created, requiredCount: required.length };
+}
+
+async function initializeCompanyPortals(company) {
+  if (!company) return;
+  await ensureCollectionsForCompanyDb(company);
+}
+
+/**
+ * Ensure all portal collections exist on the company DB for the current request (upload / writes).
+ * Uses body.company, ?company, ?companyId, x-company, JWT.
+ */
+async function ensureCompanyPortalsForTenantRequest(req) {
+  const company = getTenantCompanyFromRequest(req);
+  if (!company) {
+    return { ok: false, company: null };
+  }
+  try {
+    await ensureCollectionsForCompanyDb(company);
+  } catch (e) {
+    console.warn('[portal-setup] ensureCompanyPortalsForTenantRequest:', e.message);
+    return { ok: false, company, error: e.message };
+  }
+  return { ok: true, company };
 }
 
 /**
@@ -340,7 +345,8 @@ async function initializeAllPortals() {
     console.log(`\n📦 [portal-setup] Initializing all portal databases and collections...\n`);
     
     // Also ensure login database has users collection
-    const loginDb = client.db(LOGIN_DB_NAME);
+    const mainClient = await ensureClient('main');
+    const loginDb = mainClient.db(LOGIN_DB_NAME);
     const loginCollections = await loginDb.listCollections().toArray();
     const loginCollectionNames = loginCollections.map(col => col.name);
     
@@ -356,9 +362,7 @@ async function initializeAllPortals() {
     }
     
     // Initialize each portal
-    for (const portalName of Object.keys(PORTAL_CONFIG)) {
-      await initializePortalDatabase(portalName);
-    }
+    // NOTE: In new multi-company setup, company DBs are initialized at login time.
     
     console.log(`\n✅ [portal-setup] All portal databases and collections initialized successfully!\n`);
   } catch (error) {
@@ -372,8 +376,12 @@ module.exports = {
   getDb,
   getEmployeePortalDb,
   getUsersCollection,
-  getEmployeeCollectionName,
-  initializePortalDatabase,
+  initializePortalDatabaseForDb,
+  initializeCompanyPortals,
+  ensureCompanyPortalsForTenantRequest,
+  ensureCollectionsForCompanyDb,
+  resolveCompanyDbName,
+  getAllRequiredCompanyCollectionNames,
   initializeAllPortals,
   PORTAL_CONFIG,
   LOGIN_DB_NAME,

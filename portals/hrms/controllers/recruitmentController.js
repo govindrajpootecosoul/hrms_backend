@@ -1,4 +1,4 @@
-const { connectMongo } = require('../../../config/mongo');
+const { connectMongo, initializeCompanyPortals } = require('../../../config/mongo');
 const {
   getCompanyFromRequest,
   normalizeCompany,
@@ -7,6 +7,18 @@ const {
   getAllHrmsDbs,
   getEmployeeDbForHrms,
 } = require('../utils/hrmsContext');
+
+/** Avoid RangeError from Invalid Date when calling toISOString() */
+function toYmdUTC(value) {
+  if (value == null || value === '') return null;
+  const d = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(d.getTime())) return null;
+  return d.toISOString().split('T')[0];
+}
+
+function escapeRegExp(s) {
+  return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
 
 async function recruitmentAnalytics(req, res) {
   try {
@@ -132,8 +144,7 @@ async function recruitmentAnalytics(req, res) {
     const today = new Date().toISOString().split('T')[0];
     const todayCalls = {};
     filteredRecords.forEach(record => {
-      const callDate = record.callingDate ? new Date(record.callingDate).toISOString().split('T')[0] : 
-                      (record.assignDate ? new Date(record.assignDate).toISOString().split('T')[0] : null);
+      const callDate = toYmdUTC(record.callingDate) || toYmdUTC(record.assignDate);
       if (callDate === today) {
         const hrName = record.assignedTo || 'Unknown';
         todayCalls[hrName] = (todayCalls[hrName] || 0) + 1;
@@ -282,7 +293,8 @@ async function recruitmentAnalytics(req, res) {
     console.error('HRMS recruitment analytics error:', error);
     res.status(500).json({
       success: false,
-      error: 'Internal server error'
+      error:
+        process.env.NODE_ENV === 'development' ? error.message || 'Internal server error' : 'Internal server error',
     });
   }
 }
@@ -303,20 +315,18 @@ async function listCandidates(req, res) {
       baseQuery.status = status;
     }
     if (recruiter && recruiter !== 'All Recruiters') {
-      const recruiterRegex = new RegExp(`^${recruiter}$`, 'i');
-      baseQuery.assignedTo = recruiterRegex;
+      baseQuery.assignedTo = new RegExp(`^${escapeRegExp(recruiter)}$`, 'i');
     }
     if (search) {
+      const safe = escapeRegExp(search);
       baseQuery.$or = [
-        // Candidate core fields
-        { candidateName: { $regex: search, $options: 'i' } },
-        { email: { $regex: search, $options: 'i' } },
-        { contactNumber: { $regex: search, $options: 'i' } },
-        { currentOrganisation: { $regex: search, $options: 'i' } },
-        // Additional columns visible in the table
-        { folderName: { $regex: search, $options: 'i' } },
-        { assignedTo: { $regex: search, $options: 'i' } },
-        { status: { $regex: search, $options: 'i' } }
+        { candidateName: { $regex: safe, $options: 'i' } },
+        { email: { $regex: safe, $options: 'i' } },
+        { contactNumber: { $regex: safe, $options: 'i' } },
+        { currentOrganisation: { $regex: safe, $options: 'i' } },
+        { folderName: { $regex: safe, $options: 'i' } },
+        { assignedTo: { $regex: safe, $options: 'i' } },
+        { status: { $regex: safe, $options: 'i' } }
       ];
     }
 
@@ -387,7 +397,10 @@ async function listCandidates(req, res) {
         };
         
         const status = candidate.status || 'New';
-        const assignDate = candidate.assignDate ? new Date(candidate.assignDate).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : 'N/A';
+        const assignDate =
+          toYmdUTC(candidate.assignDate)
+            ? new Date(candidate.assignDate).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
+            : 'N/A';
         
         return {
           id: candidate._id.toString(), // Always use _id.toString() - no fallback
@@ -449,7 +462,8 @@ async function listCandidates(req, res) {
     console.error('HRMS recruitment candidates error:', error);
     res.status(500).json({
       success: false,
-      error: 'Internal server error'
+      error:
+        process.env.NODE_ENV === 'development' ? error.message || 'Internal server error' : 'Internal server error',
     });
   }
 }
@@ -482,17 +496,17 @@ async function listHiring(req, res) {
       }
     }
     if (recruiter && recruiter !== 'All Recruiters') {
-      const recruiterRegex = new RegExp(`^${recruiter}$`, 'i');
-      query.assignedTo = recruiterRegex;
+      query.assignedTo = new RegExp(`^${escapeRegExp(recruiter)}$`, 'i');
     }
     if (search) {
+      const safe = escapeRegExp(search);
       query.$and = query.$and || [];
       query.$and.push({
         $or: [
-          { candidateName: { $regex: search, $options: 'i' } },
-          { email: { $regex: search, $options: 'i' } },
-          { contactNumber: { $regex: search, $options: 'i' } },
-          { currentOrganisation: { $regex: search, $options: 'i' } }
+          { candidateName: { $regex: safe, $options: 'i' } },
+          { email: { $regex: safe, $options: 'i' } },
+          { contactNumber: { $regex: safe, $options: 'i' } },
+          { currentOrganisation: { $regex: safe, $options: 'i' } }
         ]
       });
     }
@@ -599,17 +613,17 @@ async function listOnboarding(req, res) {
       query.onboardingStage = stage;
     }
     if (recruiter && recruiter !== 'All Recruiters') {
-      const recruiterRegex = new RegExp(`^${recruiter}$`, 'i');
-      query.assignedTo = recruiterRegex;
+      query.assignedTo = new RegExp(`^${escapeRegExp(recruiter)}$`, 'i');
     }
     if (search) {
+      const safe = escapeRegExp(search);
       query.$and = query.$and || [];
       query.$and.push({
         $or: [
-          { candidateName: { $regex: search, $options: 'i' } },
-          { email: { $regex: search, $options: 'i' } },
-          { contactNumber: { $regex: search, $options: 'i' } },
-          { position: { $regex: search, $options: 'i' } }
+          { candidateName: { $regex: safe, $options: 'i' } },
+          { email: { $regex: safe, $options: 'i' } },
+          { contactNumber: { $regex: safe, $options: 'i' } },
+          { position: { $regex: safe, $options: 'i' } }
         ]
       });
     }
@@ -748,12 +762,8 @@ async function getCandidateById(req, res) {
     }
     
     // Format dates for frontend
-    const formatDate = (date) => {
-      if (!date) return null;
-      const d = new Date(date);
-      return d.toISOString().split('T')[0];
-    };
-    
+    const formatDate = (date) => toYmdUTC(date);
+
     // Return all candidate fields
     res.json({
       success: true,
@@ -798,6 +808,11 @@ async function createCandidate(req, res) {
     const company = requireCompany(req, res);
     if (!company) return;
     await connectMongo();
+    try {
+      await initializeCompanyPortals(company);
+    } catch (e) {
+      console.warn('[recruitment] initializeCompanyPortals (create):', e.message);
+    }
     const candidateData = req.body;
     const db = await getHrmsDb(company);
     const recruitmentCol = db.collection('recruitment');
@@ -863,8 +878,20 @@ async function bulkUploadCandidates(req, res) {
       });
     }
 
-    // Get HRMS database - use default if no company specified (for admin portal)
-    const db = await getHrmsDb(company || candidateCompany || null);
+    const effectiveCompany = company || candidateCompany;
+    if (!effectiveCompany) {
+      return res.status(400).json({
+        success: false,
+        error: 'Company is required for bulk upload (body, query, header, or JWT).',
+      });
+    }
+    try {
+      await initializeCompanyPortals(effectiveCompany);
+    } catch (e) {
+      console.warn('[recruitment] initializeCompanyPortals:', e.message);
+    }
+
+    const db = await getHrmsDb(effectiveCompany);
     const recruitmentCol = db.collection('recruitment');
     
     const insertedCandidates = [];
@@ -898,7 +925,7 @@ async function bulkUploadCandidates(req, res) {
           interviewerFeedback: candidateData.interviewerFeedback || '',
           remark: candidateData.remark || '',
           folderName: candidateData.folderName || '',
-          company: candidateData.company || company || candidateCompany || null,
+          company: candidateData.company || effectiveCompany || null,
           createdAt: new Date(),
           updatedAt: new Date()
         };
@@ -1031,13 +1058,8 @@ async function updateCandidate(req, res) {
       updatedCandidate = await recruitmentCol.findOne({ _id: new ObjectId(candidateId) });
     }
     
-    // Format dates for frontend
-    const formatDate = (date) => {
-      if (!date) return null;
-      const d = new Date(date);
-      return d.toISOString().split('T')[0];
-    };
-    
+    const formatDate = (date) => toYmdUTC(date);
+
     // Return all candidate fields
     res.json({
       success: true,
@@ -1184,7 +1206,11 @@ async function bulkDeleteCandidates(req, res) {
         totalDeleted += result.deletedCount;
       }
     } else {
-      // Get HRMS database for specific company
+      try {
+        await initializeCompanyPortals(company);
+      } catch (e) {
+        console.warn('[recruitment] initializeCompanyPortals (bulk delete):', e.message);
+      }
       const db = await getHrmsDb(company);
       const recruitmentCol = db.collection('recruitment');
       const result = await recruitmentCol.deleteMany({ _id: { $in: objectIds } });

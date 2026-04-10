@@ -4,16 +4,8 @@ const User = require('../models/User');
 const { connectMongo, getUsersCollection, LOGIN_DB_NAME } = require('../../../config/mongo');
 const { ensureQueryTrackerConnection } = require('../config/database');
 
-// Ensure Query Tracker database is connected (using the helper)
-async function ensureQueryTrackerDB() {
-  await ensureQueryTrackerConnection();
-}
-
 const auth = async (req, res, next) => {
   try {
-    // Ensure Query Tracker database connection
-    await ensureQueryTrackerDB();
-    
     // Try multiple ways to get the Authorization header
     const authHeader = req.header('Authorization') || req.headers.authorization || req.headers.Authorization;
     let token = null;
@@ -70,6 +62,21 @@ const auth = async (req, res, next) => {
     
     // Priority 1: If token has email, use that to find/create user (main auth uses email)
     if (decoded.email) {
+      // Resolve company from main login DB, then connect mongoose to that company DB
+      let company = null;
+      try {
+        await connectMongo(LOGIN_DB_NAME);
+        const mainUsersCol = await getUsersCollection();
+        const mainUserForCompany = await mainUsersCol.findOne({ email: decoded.email });
+        company = mainUserForCompany?.company || null;
+      } catch (_e) {}
+
+      if (!company) {
+        return res.status(400).json({ message: 'Company not found for user' });
+      }
+
+      await ensureQueryTrackerConnection(company);
+
       // First try to find user in Query Tracker database by email
       try {
         user = await User.findOne({ email: decoded.email }).select('-password');
@@ -184,6 +191,7 @@ const auth = async (req, res, next) => {
       role: user.role 
     });
     req.user = user;
+    req.user.company = req.user.company || decoded.company || undefined;
     next();
   } catch (error) {
     console.error('Auth middleware error:', error);

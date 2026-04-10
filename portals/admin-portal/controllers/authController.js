@@ -3,14 +3,14 @@ const router = express.Router();
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const { ObjectId } = require('mongodb');
-const pool = require('../../../config/database');
-const { connectMongo, getUsersCollection, LOGIN_DB_NAME } = require('../../../config/mongo');
+const { connectMongo, getUsersCollection, LOGIN_DB_NAME, initializeCompanyPortals } = require('../../../config/mongo');
+const { config } = require('../../../config/app.config');
 
 // Signup endpoint
 
 async function signup(req, res) {
   try {
-    const { name, email, phone, role, password } = req.body;
+    const { name, email, phone, role, password, employeeId, company, department } = req.body;
 
     // Validation
     if (!name || !email || !phone || !role || !password) {
@@ -45,31 +45,48 @@ async function signup(req, res) {
       });
     }
 
-    // Check if user already exists
-    const [existingUsers] = await pool.execute(
-      'SELECT id FROM users WHERE email = ?',
-      [email]
-    );
-
-    if (existingUsers.length > 0) {
-      return res.status(400).json({
-        success: false,
-        error: 'User with this email already exists'
-      });
+    // Ensure login DB connected
+    await connectMongo(LOGIN_DB_NAME);
+    const usersCol = await getUsersCollection();
+    const existingUser = await usersCol.findOne({
+      email: { $regex: new RegExp(`^${String(email).replace(/[.*+?^${}()|[\]\\]/g, '\\\\$&')}$`, 'i') },
+    });
+    if (existingUser) {
+      return res.status(400).json({ success: false, error: 'User with this email already exists' });
     }
 
     // Hash password
     const hashedPassword = await bcrypt.hash(password, 10);
 
-    // Insert user
-    const [result] = await pool.execute(
-      'INSERT INTO users (name, email, phone, role, password) VALUES (?, ?, ?, ?, ?)',
-      [name, email, phone, role, hashedPassword]
-    );
+    const now = new Date();
+    const doc = {
+      name,
+      email,
+      phone: phone || '',
+      password: hashedPassword,
+      role,
+      employeeId: employeeId || '',
+      company: company || '',
+      department: department || '',
+      isActive: true,
+      createdAt: now,
+      updatedAt: now,
+      hasCredentialAccess: true,
+      hasSubscriptionAccess: true,
+    };
+    const result = await usersCol.insertOne(doc);
+
+    if (doc.company) {
+      try {
+        await initializeCompanyPortals(doc.company);
+      } catch (e) {
+        console.warn('[signup] portal collections init skipped:', e.message);
+      }
+    }
 
     // Generate JWT token
     const token = jwt.sign(
-      { userId: result.insertId, email, role },
+      { userId: result.insertedId.toString(), email, role, company: doc.company },
       process.env.JWT_SECRET || 'your-secret-key-change-in-production',
       { expiresIn: '7d' }
     );
@@ -79,11 +96,13 @@ async function signup(req, res) {
       message: 'User created successfully',
       token,
       user: {
-        id: result.insertId,
+        id: result.insertedId.toString(),
         name,
         email,
         phone,
-        role
+        role,
+        company: doc.company,
+        employeeId: doc.employeeId,
       }
     });
   } catch (error) {
@@ -120,23 +139,11 @@ async function login(req, res) {
       });
     }
 
-    // Connect to login database (Employees_List)
     await connectMongo(LOGIN_DB_NAME);
-    
-    // Get the appropriate collection based on email domain
-    let usersCol;
-    let collectionName;
-    try {
-      usersCol = await getUsersCollection(email);
-      collectionName = emailLower.endsWith('@thrivebrands.ai') ? 'Thrive_Employees' : 'Ecosoul_Employees';
-      console.log(`[login] Querying ${collectionName} collection in database: ${LOGIN_DB_NAME}, email: ${email}`);
-    } catch (error) {
-      console.error(`[login] Error getting collection: ${error.message}`);
-      return res.status(400).json({
-        success: false,
-        error: error.message || 'Invalid email domain'
-      });
-    }
+
+    const usersCol = await getUsersCollection();
+    const usersNs = `${LOGIN_DB_NAME}.${config.mongodb.usersCollection}`;
+    console.log(`[login] Querying ${usersNs}, email: ${email}`);
     
     // Use case-insensitive email matching
     const user = await usersCol.findOne({ email: { $regex: new RegExp(`^${email.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') } });
@@ -176,11 +183,21 @@ async function login(req, res) {
       {
         userId: user._id?.toString(),
         email: user.email,
-        role: user.role
+        role: user.role,
+        company: user.company,
       },
       process.env.JWT_SECRET || 'your-secret-key-change-in-production',
       { expiresIn: '7d' }
     );
+
+    // Auto-initialize required portal collections inside the company DB (on the company Mongo server)
+    if (user.company) {
+      try {
+        await initializeCompanyPortals(user.company);
+      } catch (e) {
+        console.warn('[login] portal init skipped/failed:', e.message);
+      }
+    }
 
     console.log('Login successful for user:', user.email);
 
@@ -234,10 +251,8 @@ async function verify(req, res) {
       process.env.JWT_SECRET || 'your-secret-key-change-in-production'
     );
 
-    // Connect to login database (Employees_List)
     await connectMongo(LOGIN_DB_NAME);
-    
-    // Get the appropriate collection based on email from token
+
     const userEmail = decoded.email;
     if (!userEmail) {
       return res.status(401).json({
@@ -245,10 +260,9 @@ async function verify(req, res) {
         error: 'Invalid token: email not found'
       });
     }
-    
-    const usersCol = await getUsersCollection(userEmail);
-    const collectionName = userEmail.toLowerCase().endsWith('@thrivebrands.ai') ? 'Thrive_Employees' : 'Ecosoul_Employees';
-    console.log(`[verify] Querying ${collectionName} collection in database: ${LOGIN_DB_NAME}, email: ${userEmail}`);
+
+    const usersCol = await getUsersCollection();
+    console.log(`[verify] Querying ${LOGIN_DB_NAME}.${config.mongodb.usersCollection}, email: ${userEmail}`);
 
     const user = await usersCol.findOne({ _id: new ObjectId(decoded.userId) });
 

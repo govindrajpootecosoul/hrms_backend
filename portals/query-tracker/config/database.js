@@ -1,25 +1,30 @@
 const mongoose = require('mongoose');
-const { config, getMongoUri } = require('../../../config/app.config');
+const { getMongoUriForCompany } = require('../../../config/database.config');
 
-// Query Tracker database configuration
-const QUERY_TRACKER_DB_NAME = config.mongodb.queryTrackerDbName;
-const QUERY_TRACKER_MONGO_URI = getMongoUri();
-
-async function ensureQueryTrackerConnection() {
+// In the new setup, Query Tracker data is stored inside the company DB (on company Mongo server).
+async function ensureQueryTrackerConnection(company) {
   try {
-    // If not connected, connect to Query Tracker database
+    if (!company) {
+      throw new Error('company is required for Query Tracker');
+    }
+    const dbName = company;
+    const uriBase = getMongoUriForCompany(company);
+    const base = uriBase.endsWith('/') ? uriBase : `${uriBase}/`;
+    const fullUri = `${base}${encodeURIComponent(dbName)}`;
+
+    // If not connected, connect to company DB
     if (mongoose.connection.readyState === 0) {
-      await mongoose.connect(`${QUERY_TRACKER_MONGO_URI}${QUERY_TRACKER_DB_NAME}`, {
+      await mongoose.connect(fullUri, {
         useNewUrlParser: true,
         useUnifiedTopology: true
       });
-      console.log(`[Query Tracker DB] Connected to: ${QUERY_TRACKER_DB_NAME}`);
+      console.log(`[Query Tracker DB] Connected to company DB: ${dbName}`);
     } else {
-      // If connected to a different database, switch to Query Tracker
+      // If connected to a different database, switch to company DB
       const currentDbName = mongoose.connection.db?.databaseName;
-      if (currentDbName !== QUERY_TRACKER_DB_NAME) {
-        mongoose.connection.useDb(QUERY_TRACKER_DB_NAME);
-        console.log(`[Query Tracker DB] Switched to: ${QUERY_TRACKER_DB_NAME}`);
+      if (currentDbName !== dbName) {
+        mongoose.connection.useDb(dbName);
+        console.log(`[Query Tracker DB] Switched to company DB: ${dbName}`);
       }
     }
     return mongoose.connection;
@@ -31,6 +36,5 @@ async function ensureQueryTrackerConnection() {
 
 module.exports = {
   ensureQueryTrackerConnection,
-  QUERY_TRACKER_DB_NAME
 };
 

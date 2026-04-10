@@ -1,20 +1,11 @@
 const { connectMongo, getDb, getEmployeePortalDb } = require('../../../config/mongo');
-const { getCompanyDatabaseName } = require('../../../config/database.config');
+const { getTenantCompanyFromRequest } = require('../../../config/tenantCompany');
 
 /**
- * Get company from request (query parameter, route param, or header)
- * Supports:
- * - ?company=Thrive
- * - ?companyId=2 (normalized later to 'Thrive')
- * - x-company header
+ * Company for HRMS: body.company, ?company, ?companyId (1/2 → names), x-company, JWT.
  */
 function getCompanyFromRequest(req) {
-  return (
-    req.query.company ||
-    req.query.companyId ||
-    req.headers['x-company'] ||
-    null
-  );
+  return getTenantCompanyFromRequest(req);
 }
 
 /**
@@ -52,22 +43,12 @@ const RECRUITMENT_RECRUITER_NAMES = ['Priyanka', 'Charu', 'Megha', 'Harshita', '
  * For HRMS Admin Portal, if company is null or 'all', return default database with all data
  */
 async function getHrmsDb(company = null) {
-  await connectMongo();
-  // For HRMS Admin Portal - show all data if company is null or 'all'
+  // New setup: HRMS data is stored in the company DB (company-specific Mongo server).
+  // For admin "all", callers should query both companies explicitly.
   if (!company || company === 'all' || company === 'undefined') {
-    const { getDatabaseName } = require('../../../config/database.config');
-    return (await getDb(getDatabaseName('hrms')));
+    throw new Error('company is required (Ecosoul Home / Thrive)');
   }
-  // Note: Ecosoul HRMS data is stored in legacy DB name "ecosoul_home_hrms".
-  // Thrive continues using canonical DB name from getCompanyDatabaseName().
-  const isEcosoul = String(company).toLowerCase().includes('ecosoul');
-  const dbName = isEcosoul ? 'ecosoul_home_hrms' : getCompanyDatabaseName('hrms', company);
-  const { MongoClient } = require('mongodb');
-  const { getMongoUri } = require('../../../config/app.config');
-  const uri = getMongoUri();
-  const client = new MongoClient(uri);
-  await client.connect();
-  return client.db(dbName);
+  return await getDb(company);
 }
 
 /**
@@ -75,44 +56,20 @@ async function getHrmsDb(company = null) {
  * Optimized for fast loading - uses parallel queries
  */
 async function getAllHrmsDbs() {
-  await connectMongo();
-  const { getDatabaseName } = require('../../../config/database.config');
-  
-  // Get default HRMS database
-  const defaultDb = await getDb(getDatabaseName('hrms'));
-  
-  // Try to get company-specific databases in parallel for faster loading
+  // New setup: always return both company DBs (they live on different Mongo servers).
+  // If one server is down, it will be skipped.
   const companyNames = ['Ecosoul Home', 'Thrive'];
-  const dbPromises = companyNames.map(async (companyName) => {
-    try {
-      const dbName = companyName.toLowerCase().includes('ecosoul')
-        ? 'ecosoul_home_hrms'
-        : getCompanyDatabaseName('hrms', companyName);
-      const { MongoClient } = require('mongodb');
-      const { getMongoUri } = require('../../../config/app.config');
-      const uri = getMongoUri();
-      const client = new MongoClient(uri);
-      await client.connect();
-      const db = client.db(dbName);
-      
-      // Quick check if database has data
-      const recruitmentCol = db.collection('recruitment');
-      const count = await recruitmentCol.countDocuments({}, { limit: 1 });
-      if (count > 0) {
-        return db;
+  const dbs = await Promise.all(
+    companyNames.map(async (company) => {
+      try {
+        await connectMongo(company);
+        return await getDb(company);
+      } catch (_e) {
+        return null;
       }
-      await client.close();
-      return null;
-    } catch (err) {
-      // Database doesn't exist or error, skip
-      return null;
-    }
-  });
-  
-  const companyDbs = await Promise.all(dbPromises);
-  const dbs = [defaultDb, ...companyDbs.filter(db => db !== null)];
-  
-  return dbs;
+    })
+  );
+  return dbs.filter(Boolean);
 }
 
 /**
@@ -120,10 +77,7 @@ async function getAllHrmsDbs() {
  */
 async function getEmployeeDbForHrms(company = null) {
   await connectMongo();
-  if (!company) {
-    const { getDatabaseName } = require('../../../config/database.config');
-    return (await getDb(getDatabaseName('employee')));
-  }
+  if (!company) throw new Error('company is required (Ecosoul Home / Thrive)');
   return await getEmployeePortalDb(company);
 }
 

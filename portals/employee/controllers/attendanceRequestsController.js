@@ -1,12 +1,11 @@
-﻿const { connectMongo } = require('../../../config/mongo');
 const { getCompanyFromRequest } = require('../utils/employeeContext');
 const { submitRequest, listRequests } = require('../services/attendanceRequestsService');
 
 async function submitAttendanceRequest(req, res) {
   try {
-    await connectMongo();
     const { employeeId } = req.body || {};
     const company = getCompanyFromRequest(req);
+    if (!company) return res.status(400).json({ success: false, error: 'company is required' });
 
     const data = await submitRequest({ employeeId, company, body: req.body });
 
@@ -27,9 +26,9 @@ async function submitAttendanceRequest(req, res) {
 
 async function listAttendanceRequests(req, res) {
   try {
-    await connectMongo();
     const employeeId = req.query.employeeId;
     const company = getCompanyFromRequest(req);
+    if (!company) return res.status(400).json({ success: false, error: 'company is required' });
 
     const data = await listRequests({ employeeId, company });
 
