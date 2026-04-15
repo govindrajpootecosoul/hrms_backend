@@ -161,6 +161,13 @@ router.get('/', async (req, res) => {
       location: user.location || '',
       reportingManager: user.reportingManager || '',
       joiningDate: user.joiningDate || '',
+      exitDate: (() => {
+        const v = user.exitDate;
+        if (v == null || v === '') return '';
+        if (v instanceof Date) return v.toISOString().slice(0, 10);
+        const s = String(v);
+        return s.includes('T') ? s.slice(0, 10) : s;
+      })(),
       
       // Bank & Insurance
       bankAccount: user.bankAccount || '',
@@ -357,7 +364,7 @@ router.post('/', async (req, res) => {
       // Personal details
       phone, dateOfBirth, gender, address, city, state, zipCode, emergencyContact, emergencyPhone,
       // Work details
-      jobTitle, location, reportingManager, joiningDate,
+      jobTitle, location, reportingManager, joiningDate, exitDate,
       // Bank & Insurance
       bankAccount, ifsc, pan, aadhaar, uan, esiNo, pfNo
     } = req.body;
@@ -440,6 +447,7 @@ router.post('/', async (req, res) => {
       location: location || '',
       reportingManager: reportingManager || '',
       joiningDate: joiningDate || '',
+      exitDate: active === false && exitDate ? String(exitDate).trim() : '',
       
       // Bank & Insurance
       bankAccount: bankAccount || '',
@@ -507,6 +515,7 @@ router.post('/', async (req, res) => {
         location: newUser.location,
         reportingManager: newUser.reportingManager,
         joiningDate: newUser.joiningDate,
+        exitDate: newUser.exitDate || '',
         bankAccount: newUser.bankAccount,
         ifsc: newUser.ifsc,
         pan: newUser.pan,
@@ -538,7 +547,7 @@ router.put('/:id', async (req, res) => {
       // Personal details
       phone, dateOfBirth, gender, address, city, state, zipCode, emergencyContact, emergencyPhone,
       // Work details
-      jobTitle, location, reportingManager, joiningDate,
+      jobTitle, location, reportingManager, joiningDate, exitDate,
       // Bank & Insurance
       bankAccount, ifsc, pan, aadhaar, uan, esiNo, pfNo
     } = req.body;
@@ -610,7 +619,12 @@ router.put('/:id', async (req, res) => {
       }
       updateData.password = await bcrypt.hash(password, 10);
     }
-    if (active !== undefined) updateData.isActive = active;
+    if (active !== undefined) {
+      updateData.isActive = active;
+      if (active === true) {
+        updateData.exitDate = null;
+      }
+    }
     if (portals !== undefined) updateData.portals = portals; // Array of portal names
     if (role !== undefined) updateData.role = role;
     if (employeeId !== undefined) updateData.employeeId = employeeId;
@@ -635,7 +649,15 @@ router.put('/:id', async (req, res) => {
     if (location !== undefined) updateData.location = location;
     if (reportingManager !== undefined) updateData.reportingManager = reportingManager;
     if (joiningDate !== undefined) updateData.joiningDate = joiningDate;
-    
+    if (exitDate !== undefined) {
+      const trimmed = exitDate != null && String(exitDate).trim() !== '' ? String(exitDate).trim() : null;
+      updateData.exitDate = trimmed;
+    } else if (active === false && existingUser.isActive !== false) {
+      const today = new Date();
+      const fallback = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+      updateData.exitDate = fallback;
+    }
+
     // Bank & Insurance - Only update if provided
     if (bankAccount !== undefined) updateData.bankAccount = bankAccount;
     if (ifsc !== undefined) updateData.ifsc = ifsc;
@@ -670,7 +692,14 @@ router.put('/:id', async (req, res) => {
         department: updatedUser.department || '',
         company: updatedUser.company || '',
         hasCredentialAccess: updatedUser.hasCredentialAccess !== false,
-        hasSubscriptionAccess: updatedUser.hasSubscriptionAccess !== false
+        hasSubscriptionAccess: updatedUser.hasSubscriptionAccess !== false,
+        exitDate: updatedUser.exitDate != null && updatedUser.exitDate !== ''
+          ? (updatedUser.exitDate instanceof Date
+            ? updatedUser.exitDate.toISOString().slice(0, 10)
+            : String(updatedUser.exitDate).includes('T')
+              ? String(updatedUser.exitDate).slice(0, 10)
+              : String(updatedUser.exitDate))
+          : ''
       }
     });
   } catch (error) {
