@@ -7,6 +7,7 @@ const {
   getAllHrmsDbs,
   getEmployeeDbForHrms,
 } = require('../utils/hrmsContext');
+const { getDb, LOGIN_DB_NAME } = require('../../../config/mongo');
 
 /** `dateRange` may be Date, object, or string — .split only exists on strings */
 function splitDateRangeParts(dateRange) {
@@ -32,6 +33,118 @@ function parseCheckTime(value) {
   if (value == null || value === '') return null;
   const d = value instanceof Date ? value : new Date(value);
   return isValidDate(d) ? d : null;
+}
+
+function parseYyyyMmDd(dateStr) {
+  if (!dateStr) return null;
+  const d = new Date(`${dateStr}T00:00:00.000Z`);
+  return isValidDate(d) ? d : null;
+}
+
+function getUtcDayRange(dateStr) {
+  const d = parseYyyyMmDd(dateStr);
+  if (!d) return null;
+  const start = new Date(d);
+  start.setUTCHours(0, 0, 0, 0);
+  const end = new Date(d);
+  end.setUTCHours(23, 59, 59, 999);
+  return { start, end };
+}
+
+function timeHmFromDate(d) {
+  if (!isValidDate(d)) return null;
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+}
+
+function timeHmToDate(dateStr, hm) {
+  if (!dateStr || !hm) return null;
+  const [hh, mm] = String(hm).split(':').map((n) => Number(n));
+  if (!Number.isFinite(hh) || !Number.isFinite(mm)) return null;
+  const base = parseYyyyMmDd(dateStr);
+  if (!base) return null;
+  const d = new Date(base);
+  d.setHours(hh, mm, 0, 0);
+  return isValidDate(d) ? d : null;
+}
+
+function isLateByPunchIn(checkInTime) {
+  if (!isValidDate(checkInTime)) return false;
+  // Requirement: 09:00–09:35 is NOT late; after 09:35 is late.
+  const mins = checkInTime.getHours() * 60 + checkInTime.getMinutes();
+  return mins > 9 * 60 + 35;
+}
+
+function hmToMinutes(hm) {
+  if (!hm) return null;
+  const parts = String(hm).split(':');
+  if (parts.length !== 2) return null;
+  const h = Number(parts[0]);
+  const m = Number(parts[1]);
+  if (!Number.isFinite(h) || !Number.isFinite(m)) return null;
+  return h * 60 + m;
+}
+
+function minTimeHm(a, b) {
+  const am = hmToMinutes(a);
+  const bm = hmToMinutes(b);
+  if (am == null) return b || null;
+  if (bm == null) return a || null;
+  return am <= bm ? a : b;
+}
+
+function maxTimeHm(a, b) {
+  const am = hmToMinutes(a);
+  const bm = hmToMinutes(b);
+  if (am == null) return b || null;
+  if (bm == null) return a || null;
+  return am >= bm ? a : b;
+}
+
+function normalizeEmpCode(value) {
+  if (value == null || value === '') return null;
+  const s = String(value).trim();
+  return s ? s : null;
+}
+
+async function getMachineAttendanceForDay(dateStr) {
+  const range = getUtcDayRange(dateStr);
+  if (!range) return [];
+  const dbNamesToTry = Array.from(
+    new Set([LOGIN_DB_NAME, 'main_db'].filter((n) => n && String(n).trim() !== ''))
+  );
+  const collectionNamesToTry = ['machine_attendance_reports', 'machine _attendance_reports'];
+  const datePrefixRegex = new RegExp(`^${String(dateStr).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`);
+
+  const all = [];
+  for (const dbName of dbNamesToTry) {
+    try {
+      const db = await getDb(dbName);
+      const existingCols = new Set((await db.listCollections().toArray()).map((c) => c.name));
+      for (const colName of collectionNamesToTry) {
+        if (!existingCols.has(colName)) continue;
+        const col = db.collection(colName);
+
+        // Your DB stores `date` as ISO string (e.g. "2026-04-01T00:00:00.000Z") in many docs.
+        // Support both: Date range (Date type) and prefix match (string type).
+        let docs = await col
+          .find({
+            $or: [
+              { date: { $gte: range.start, $lte: range.end } },
+              { date: datePrefixRegex },
+              { date: dateStr },
+              { date: `${dateStr}T00:00:00.000Z` },
+            ],
+          })
+          .toArray();
+
+        all.push(...docs);
+      }
+    } catch (e) {
+      // Ignore missing DB/collection or connectivity issues for fallback DBs
+      console.warn(`[machine_attendance_reports] Skipping db '${dbName}':`, e.message);
+    }
+  }
+  return all;
 }
 
 async function listAttendance(req, res) {
@@ -92,71 +205,160 @@ async function listAttendance(req, res) {
     
     // Get only this company's employees (employee_details lives in main_db)
     const allEmployees = await usersCol.find({ company: companyName }).toArray();
-    const employeeMap = new Map();
-    allEmployees.forEach(emp => {
-      const empId = emp.employeeId || emp.email?.split('@')[0] || '';
-      if (empId) {
-        employeeMap.set(empId, {
-          name: emp.name || emp.firstName || 'Unknown',
-          department: emp.department || 'General',
-          biometricId: emp.biometricId || empId
-        });
-      }
+    const employeeByEmployeeId = new Map(); // employeeId/emailPrefix -> employee info
+    const employeeByEmpCode = new Map(); // emp_code -> employee info
+    allEmployees.forEach((emp) => {
+      const canonicalEmployeeId = emp.employeeId || emp.email?.split('@')[0] || '';
+      const empCode = normalizeEmpCode(emp.emp_code);
+      const info = {
+        name: emp.name || emp.firstName || 'Unknown',
+        department: emp.department || 'General',
+        employeeId: canonicalEmployeeId || null,
+        empCode: empCode || null,
+      };
+      if (canonicalEmployeeId) employeeByEmployeeId.set(canonicalEmployeeId, info);
+      if (emp.email) employeeByEmployeeId.set(emp.email, info);
+      if (emp.email?.includes('@')) employeeByEmployeeId.set(emp.email.split('@')[0], info);
+      if (empCode) employeeByEmpCode.set(empCode, info);
     });
 
-    // Transform data for frontend
-    const attendanceRecords = checkIns
-      .filter((record) => record && record._id != null)
-      .map((record) => {
-      const checkInTime = parseCheckTime(record.checkInTime);
-      const checkOutTime = parseCheckTime(record.checkOutTime);
-      
-      // Get employee details from map
-      const employeeInfo = employeeMap.get(record.employeeId) || {
-        name: record.employeeId || 'Unknown',
-        department: 'General',
-        biometricId: record.employeeId
-      };
-      
-      let status = 'absent';
-      let isLate = false;
-      
-      if (checkInTime && checkOutTime) {
-        status = 'present';
-        // Check if late (after 9:00 AM)
-        const checkInHour = checkInTime.getHours();
-        const checkInMinute = checkInTime.getMinutes();
-        if (checkInHour > 9 || (checkInHour === 9 && checkInMinute > 0)) {
-          isLate = true;
-        }
-      } else if (checkInTime && !checkOutTime) {
-        status = 'present';
-        const checkInHour = checkInTime.getHours();
-        const checkInMinute = checkInTime.getMinutes();
-        if (checkInHour > 9 || (checkInHour === 9 && checkInMinute > 0)) {
-          isLate = true;
+    // Machine attendance (main_db.machine_attendance_reports)
+    const machineReports = await getMachineAttendanceForDay(date);
+    const machineByEmpCode = new Map(); // emp_code -> best report
+    for (const r of machineReports) {
+      const empCode = normalizeEmpCode(r.emp_code);
+      if (!empCode) continue;
+      // Company scoping: only include machine records whose emp_code exists in this company's employee_details
+      if (!employeeByEmpCode.has(empCode)) continue;
+      // Prefer "Present" over anything else, and prefer record with punch_in.
+      const existing = machineByEmpCode.get(empCode);
+      if (!existing) {
+        machineByEmpCode.set(empCode, r);
+        continue;
+      }
+      const exStatus = String(existing.status || '').toLowerCase();
+      const rStatus = String(r.status || '').toLowerCase();
+      const exPresent = exStatus === 'present';
+      const rPresent = rStatus === 'present';
+      if (!exPresent && rPresent) {
+        machineByEmpCode.set(empCode, r);
+        continue;
+      }
+      if (exPresent === rPresent) {
+        const exHasIn = existing.punch_in != null && String(existing.punch_in).trim() !== '';
+        const rHasIn = r.punch_in != null && String(r.punch_in).trim() !== '';
+        if (!exHasIn && rHasIn) {
+          machineByEmpCode.set(empCode, r);
         }
       }
+    }
 
-      const timeIn = checkInTime ? 
-        `${String(checkInTime.getHours()).padStart(2, '0')}:${String(checkInTime.getMinutes()).padStart(2, '0')}` : 
-        null;
-      const timeOut = checkOutTime ? 
-        `${String(checkOutTime.getHours()).padStart(2, '0')}:${String(checkOutTime.getMinutes()).padStart(2, '0')}` : 
-        null;
+    // Transform data for frontend
+    const manualRecords = checkIns
+      .filter((record) => record && record._id != null)
+      .map((record) => {
+        const checkInTime = parseCheckTime(record.checkInTime);
+        const checkOutTime = parseCheckTime(record.checkOutTime);
 
-      return {
-        id: record._id.toString(),
-        date: record.date,
-        biometricId: employeeInfo.biometricId || record.employeeId,
-        employeeName: employeeInfo.name,
-        department: employeeInfo.department,
-        status: status,
-        timeIn: timeIn,
-        timeOut: timeOut,
-        isLate: isLate,
-        totalMinutes: record.totalMinutes || 0
+        const employeeInfo = employeeByEmployeeId.get(record.employeeId) || {
+          name: record.employeeId || 'Unknown',
+          department: 'General',
+          employeeId: record.employeeId || null,
+          empCode: null,
+        };
+
+        const timeIn = timeHmFromDate(checkInTime);
+        const timeOut = timeHmFromDate(checkOutTime);
+
+        let status = 'absent';
+        let isLate = false;
+        if (timeIn) {
+          status = 'present';
+          isLate = isLateByPunchIn(checkInTime);
+        }
+
+        // IMPORTANT: In UI we display `biometricId` as Employee Code. Prefer emp_code if available.
+        const biometricId = employeeInfo.empCode || employeeInfo.employeeId || record.employeeId;
+
+        return {
+          id: record._id.toString(),
+          date: record.date,
+          biometricId,
+          employeeName: employeeInfo.name,
+          department: employeeInfo.department,
+          status,
+          timeIn,
+          timeOut,
+          isLate,
+          totalMinutes: record.totalMinutes || 0,
+          source: 'manual',
+        };
+      });
+
+    // Merge machine attendance onto manual records by emp_code (biometricId).
+    const mergedByEmpCode = new Map(); // emp_code -> record
+    for (const r of manualRecords) {
+      const empCode = normalizeEmpCode(r.biometricId);
+      if (empCode) mergedByEmpCode.set(empCode, r);
+    }
+
+    for (const [empCode, m] of machineByEmpCode.entries()) {
+      const employeeInfo = employeeByEmpCode.get(empCode) || {
+        name: m.name || 'Unknown',
+        department: 'General',
+        employeeId: null,
+        empCode,
       };
+
+      const mStatus = String(m.status || '').toLowerCase();
+      // Treat MIS (missing punch-out, etc.) as present if punch_in exists.
+      const hasPunchIn = m.punch_in != null && String(m.punch_in).trim() !== '';
+      const isPresent = (mStatus === 'present' || mStatus === 'mis') && hasPunchIn;
+      if (!isPresent) continue; // requirement: only auto-checkin when machine says Present
+
+      const timeIn = m.punch_in ? String(m.punch_in).trim() : null;
+      const timeOut = m.punch_out && String(m.punch_out).trim() !== '' ? String(m.punch_out).trim() : null;
+      const checkInTime = timeHmToDate(date, timeIn);
+      let isLate = false;
+      if (checkInTime) isLate = isLateByPunchIn(checkInTime);
+
+      const existing = mergedByEmpCode.get(empCode);
+      if (existing) {
+        const chosenTimeIn = minTimeHm(existing.timeIn, timeIn);
+        const chosenTimeOut = maxTimeHm(existing.timeOut, timeOut);
+        const chosenSource = chosenTimeIn === timeIn ? 'machine' : existing.source || 'manual';
+        const chosenCheckInTime = timeHmToDate(date, chosenTimeIn);
+        mergedByEmpCode.set(empCode, {
+          ...existing,
+          status: 'present',
+          timeIn: chosenTimeIn,
+          timeOut: chosenTimeOut,
+          isLate: chosenCheckInTime ? isLateByPunchIn(chosenCheckInTime) : false,
+          source: chosenSource,
+        });
+      } else {
+        mergedByEmpCode.set(empCode, {
+          id: `machine:${empCode}:${date}`,
+          date,
+          biometricId: empCode,
+          employeeName: employeeInfo.name,
+          department: employeeInfo.department,
+          status: 'present',
+          timeIn,
+          timeOut,
+          isLate,
+          totalMinutes: 0,
+          source: 'machine',
+        });
+      }
+    }
+
+    const attendanceRecords = Array.from(mergedByEmpCode.values()).sort((a, b) => {
+      // show latest check-in first if available
+      if (a.timeIn && b.timeIn) return a.timeIn < b.timeIn ? 1 : -1;
+      if (a.timeIn) return -1;
+      if (b.timeIn) return 1;
+      return 0;
     });
 
     res.json({
@@ -211,6 +413,7 @@ async function attendanceStats(req, res) {
     
     // Build employeeId mapping - map all possible employeeId formats to a canonical form
     const employeeIdMap = new Map(); // Maps any employeeId format to canonical employeeId
+    const empCodeToCanonicalId = new Map(); // emp_code -> canonical employeeId
     employeesList.forEach(emp => {
       const canonicalId = emp.employeeId || emp.email?.split('@')[0] || '';
       if (canonicalId) {
@@ -231,6 +434,11 @@ async function attendanceStats(req, res) {
         if (emp.email) {
           employeeIdMap.set(emp.email, canonicalId);
         }
+      }
+
+      const empCode = normalizeEmpCode(emp.emp_code);
+      if (empCode && canonicalId) {
+        empCodeToCanonicalId.set(empCode, canonicalId);
       }
     });
     
@@ -287,6 +495,44 @@ async function attendanceStats(req, res) {
       console.log(`[attendance/stats] Sample today's check-in:`, JSON.stringify(todayCheckIns[0], null, 2));
     } else {
       console.log(`[attendance/stats] WARNING: No check-ins found for date ${date} in any database`);
+    }
+
+    // Add machine attendance "Present" as synthetic check-ins (so stats auto-update without manual button)
+    try {
+      const machineReports = await getMachineAttendanceForDay(date);
+      const machinePresent = machineReports.filter((r) => {
+        const st = String(r.status || '').toLowerCase();
+        const hasIn = r.punch_in != null && String(r.punch_in).trim() !== '';
+        return (st === 'present' || st === 'mis') && hasIn;
+      });
+      for (const r of machinePresent) {
+        const empCode = normalizeEmpCode(r.emp_code);
+        if (!empCode) continue;
+        const canonicalId = empCodeToCanonicalId.get(empCode);
+        if (!canonicalId) continue;
+
+        const checkInTime = timeHmToDate(date, r.punch_in ? String(r.punch_in) : null);
+        const checkOutTime = timeHmToDate(date, r.punch_out ? String(r.punch_out) : null);
+        if (!checkInTime) continue;
+
+        // Avoid duplicates if already checked-in manually
+        const already = todayCheckIns.some((c) => {
+          if (!c || !c.employeeId) return false;
+          const normalized = employeeIdMap.get(c.employeeId) || c.employeeId;
+          return normalized === canonicalId;
+        });
+        if (already) continue;
+
+        todayCheckIns.push({
+          employeeId: canonicalId,
+          checkInTime,
+          checkOutTime,
+          date,
+          source: 'machine',
+        });
+      }
+    } catch (e) {
+      console.warn('[attendance/stats] Machine attendance merge skipped:', e.message);
     }
 
     // Get approved leave requests for today

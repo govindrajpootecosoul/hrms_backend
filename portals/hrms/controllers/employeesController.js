@@ -24,8 +24,8 @@ async function listEmployees(req, res) {
       return res.status(500).json({ success: false, error: 'Failed to load employees for this company.' });
     }
     
-    // Build query
-    const query = {};
+    // Build query (always scope to company)
+    const query = { company };
     
     if (search) {
       query.$or = [
@@ -58,7 +58,9 @@ async function listEmployees(req, res) {
       phone: emp.phone || emp.mobile || '',
       joiningDate: emp.joiningDate || emp.createdAt || null,
       location: emp.location || '',
-      biometricId: emp.biometricId || emp.employeeId || ''
+      // IMPORTANT: Attendance APIs use `emp_code` as the biometric/employee code identifier.
+      // Expose it as `biometricId` so UI filters (Absent/Present sets) match correctly.
+      biometricId: emp.emp_code || emp.biometricId || emp.employeeId || emp.email?.split('@')[0] || ''
     }));
     
     res.json({

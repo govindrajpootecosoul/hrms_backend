@@ -134,6 +134,7 @@ async function listUsers(req, res) {
       location: user.location || '',
       reportingManager: user.reportingManager || '',
       joiningDate: user.joiningDate || '',
+      exitDate: user.exitDate || '',
       card_no: user.card_no || '',
       emp_code: user.emp_code || '',
       
@@ -312,7 +313,8 @@ async function getUserById(req, res) {
         hasCredentialAccess: user.hasCredentialAccess !== false,
         hasSubscriptionAccess: user.hasSubscriptionAccess !== false,
         card_no: user.card_no || '',
-        emp_code: user.emp_code || ''
+        emp_code: user.emp_code || '',
+        exitDate: user.exitDate || ''
       }
     });
   } catch (error) {
@@ -523,7 +525,7 @@ async function updateUser(req, res) {
       // Personal details
       phone, dateOfBirth, gender, address, city, state, zipCode, emergencyContact, emergencyPhone,
       // Work details
-      jobTitle, location, reportingManager, joiningDate, card_no, emp_code,
+      jobTitle, location, reportingManager, joiningDate, exitDate, card_no, emp_code,
       // Bank & Insurance
       bankAccount, ifsc, pan, aadhaar, uan, esiNo, pfNo
     } = req.body;
@@ -595,7 +597,23 @@ async function updateUser(req, res) {
       }
       updateData.password = await bcrypt.hash(password, 10);
     }
-    if (active !== undefined) updateData.isActive = active;
+    if (active !== undefined) {
+      updateData.isActive = active;
+      if (active === false) {
+        const exit = exitDate !== undefined ? String(exitDate).trim() : '';
+        if (!exit) {
+          return res.status(400).json({
+            success: false,
+            error: 'Exit date is required when marking an employee as inactive.'
+          });
+        }
+        updateData.exitDate = exit;
+      } else {
+        updateData.exitDate = null;
+      }
+    } else if (exitDate !== undefined) {
+      updateData.exitDate = exitDate === null || exitDate === '' ? null : String(exitDate).trim();
+    }
     if (portals !== undefined) updateData.portals = portals; // Array of portal names
     if (role !== undefined) updateData.role = role;
     if (employeeId !== undefined) updateData.employeeId = employeeId;
@@ -659,7 +677,8 @@ async function updateUser(req, res) {
         hasCredentialAccess: updatedUser.hasCredentialAccess !== false,
         hasSubscriptionAccess: updatedUser.hasSubscriptionAccess !== false,
         card_no: updatedUser.card_no || '',
-        emp_code: updatedUser.emp_code || ''
+        emp_code: updatedUser.emp_code || '',
+        exitDate: updatedUser.exitDate || ''
       }
     });
   } catch (error) {
@@ -745,17 +764,21 @@ async function toggleActive(req, res) {
       });
     }
 
-    // Toggle isActive
+    // Toggle isActive; record exit date when becoming inactive
     const newActiveStatus = !existingUser.isActive;
+    const setFields = {
+      isActive: newActiveStatus,
+      updatedAt: new Date()
+    };
+    if (newActiveStatus === false) {
+      setFields.exitDate = new Date().toISOString().slice(0, 10);
+    } else {
+      setFields.exitDate = null;
+    }
 
     await usersCol.updateOne(
       { _id: new ObjectId(id) },
-      { 
-        $set: { 
-          isActive: newActiveStatus,
-          updatedAt: new Date()
-        } 
-      }
+      { $set: setFields }
     );
 
     res.json({

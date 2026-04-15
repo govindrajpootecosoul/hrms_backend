@@ -1,8 +1,70 @@
-﻿const { getDb, getEmployeePortalDb } = require('../../../config/mongo');
+const { getDb, getEmployeePortalDb, getUsersCollection, LOGIN_DB_NAME } = require('../../../config/mongo');
 const { EMPLOYEE_CHECKINS } = require('../models');
 
 function todayYMD() {
   return new Date().toISOString().split('T')[0];
+}
+
+function localTodayYMD() {
+  const d = new Date();
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  const dd = String(d.getDate()).padStart(2, '0');
+  return `${yyyy}-${mm}-${dd}`;
+}
+
+/** Machine punch_in is office wall-clock time; interpret in fixed offset (default IST) so duration math matches the portal. */
+function timeHmToIso(dateYmd, hm) {
+  if (!dateYmd || !hm) return null;
+  const [h, m] = String(hm).split(':').map(Number);
+  if (!Number.isFinite(h) || !Number.isFinite(m)) return null;
+  const hh = String(h).padStart(2, '0');
+  const mm = String(m).padStart(2, '0');
+  const offset = process.env.OFFICE_TZ_OFFSET || '+05:30';
+  const d = new Date(`${dateYmd}T${hh}:${mm}:00${offset}`);
+  if (Number.isNaN(d.getTime())) return null;
+  return d.toISOString();
+}
+
+async function getMachinePunchForEmployee({ employeeId, company, dateYmd }) {
+  if (!employeeId || !company || !dateYmd) return null;
+
+  // employee_details is stored in login DB (admin) collection employee_details
+  const usersCol = await getUsersCollection(null, company);
+  const emp = await usersCol.findOne({ company, employeeId }, { projection: { emp_code: 1, name: 1 } });
+  const empCode = emp?.emp_code != null && String(emp.emp_code).trim() !== '' ? String(emp.emp_code).trim() : null;
+  if (!empCode) return null;
+
+  const loginDb = await getDb(LOGIN_DB_NAME);
+  const col = loginDb.collection('machine _attendance_reports');
+
+  // In this DB, `date` is sometimes stored as Date and sometimes as string.
+  const start = new Date(`${dateYmd}T00:00:00.000Z`);
+  const end = new Date(`${dateYmd}T23:59:59.999Z`);
+
+  const doc = await col.findOne(
+    {
+      emp_code: { $in: [Number(empCode), empCode] },
+      $or: [
+        { date: { $gte: start, $lte: end } },
+        { date: new RegExp(`^${dateYmd}`) },
+        { date: dateYmd },
+        { date: `${dateYmd}T00:00:00.000Z` },
+      ],
+    },
+    { projection: { punch_in: 1, punch_out: 1, status: 1, date: 1 } }
+  );
+  if (!doc) return null;
+
+  const hasPunchIn = doc.punch_in != null && String(doc.punch_in).trim() !== '';
+  if (!hasPunchIn) return null;
+
+  return {
+    empCode,
+    status: String(doc.status || ''),
+    punchIn: String(doc.punch_in).trim(),
+    punchOut: doc.punch_out != null && String(doc.punch_out).trim() !== '' ? String(doc.punch_out).trim() : null,
+  };
 }
 
 async function getCheckinsCollection(company) {
@@ -127,22 +189,52 @@ async function getTodayStatus({ employeeId, company, cache }) {
   }
 
   const col = await getCheckinsCollection(company);
-  const today = todayYMD();
+  // Prefer local date for UI correctness, but also allow UTC date for existing records.
+  const todayLocal = localTodayYMD();
+  const todayUtc = todayYMD();
+  const today = todayLocal;
 
   const mostRecentCheckIn = await col
-    .find({ employeeId, date: today })
+    .find({ employeeId, date: { $in: [todayLocal, todayUtc] } })
     .sort({ checkInTime: -1 })
     .limit(1)
     .project({ checkInTime: 1, checkOutTime: 1, totalMinutes: 1, status: 1 })
     .next();
 
+  const completedSessionsToday = await col.countDocuments({
+    employeeId,
+    date: { $in: [todayLocal, todayUtc] },
+    checkOutTime: { $ne: null },
+  });
+
+  // Machine punch (biometric/card) can exist even if user hasn't clicked manual check-in.
+  const machine = await getMachinePunchForEmployee({ employeeId, company, dateYmd: todayLocal });
+  const machineCheckInIso = machine?.punchIn ? timeHmToIso(todayLocal, machine.punchIn) : null;
+
   if (!mostRecentCheckIn) {
+    if (machineCheckInIso) {
+      const checkInTime = new Date(machineCheckInIso);
+      const now = new Date();
+      const currentSessionMinutes = Math.max(0, (now.getTime() - checkInTime.getTime()) / 60000);
+      const data = {
+        status: 'checked-in',
+        checkInTime: machineCheckInIso,
+        checkOutTime: null,
+        totalMinutes: currentSessionMinutes,
+        employeeId,
+        source: 'machine',
+        earliestPunchInTime: null,
+      };
+      if (cache) cache.map.set(cacheKey, { ts: nowTs, data });
+      return data;
+    }
     const data = {
       status: 'checked-out',
       checkInTime: null,
       checkOutTime: null,
       totalMinutes: 0,
       employeeId,
+      earliestPunchInTime: null,
     };
     if (cache) cache.map.set(cacheKey, { ts: nowTs, data });
     return data;
@@ -151,10 +243,44 @@ async function getTodayStatus({ employeeId, company, cache }) {
   let totalMinutes = mostRecentCheckIn.totalMinutes || 0;
   let status = mostRecentCheckIn.status || (mostRecentCheckIn.checkOutTime ? 'checked-out' : 'checked-in');
 
+  const manualCheckInIso = mostRecentCheckIn.checkInTime || null;
+  // Display: earliest punch when both machine and portal exist the same "segment".
+  let earliestPunchInIso = null;
+  if (machineCheckInIso && manualCheckInIso) {
+    earliestPunchInIso =
+      new Date(machineCheckInIso).getTime() <= new Date(manualCheckInIso).getTime() ? machineCheckInIso : manualCheckInIso;
+  }
+
+  let source = 'manual';
+  if (machineCheckInIso && manualCheckInIso) {
+    source = earliestPunchInIso === machineCheckInIso ? 'machine' : 'manual';
+  } else if (machineCheckInIso && !manualCheckInIso) {
+    source = 'machine';
+  }
+
+  /**
+   * Session anchor for elapsed time: min(machine, manual) for the first open session of the day.
+   * If the employee already completed a session today, machine punch is still "first arrival" for the day
+   * but must not extend the *current* portal session — use manual check-in for that segment only.
+   */
+  let sessionAnchorIso = manualCheckInIso;
   if (mostRecentCheckIn.checkInTime && !mostRecentCheckIn.checkOutTime) {
-    const checkInTime = new Date(mostRecentCheckIn.checkInTime);
+    if (completedSessionsToday > 0) {
+      sessionAnchorIso = manualCheckInIso;
+    } else if (machineCheckInIso && manualCheckInIso) {
+      sessionAnchorIso =
+        new Date(machineCheckInIso).getTime() <= new Date(manualCheckInIso).getTime() ? machineCheckInIso : manualCheckInIso;
+    } else if (machineCheckInIso) {
+      sessionAnchorIso = machineCheckInIso;
+    } else {
+      sessionAnchorIso = manualCheckInIso;
+    }
+  }
+
+  if (mostRecentCheckIn.checkInTime && !mostRecentCheckIn.checkOutTime) {
+    const anchor = sessionAnchorIso ? new Date(sessionAnchorIso) : new Date(mostRecentCheckIn.checkInTime);
     const now = new Date();
-    const currentSessionMinutes = Math.max(0, (now.getTime() - checkInTime.getTime()) / 60000);
+    const currentSessionMinutes = Math.max(0, (now.getTime() - anchor.getTime()) / 60000);
     totalMinutes = (mostRecentCheckIn.totalMinutes || 0) + currentSessionMinutes;
     status = 'checked-in';
   } else {
@@ -163,10 +289,15 @@ async function getTodayStatus({ employeeId, company, cache }) {
 
   const data = {
     status,
-    checkInTime: mostRecentCheckIn.checkInTime || null,
+    checkInTime: status === 'checked-in' ? sessionAnchorIso || null : null,
     checkOutTime: mostRecentCheckIn.checkOutTime || null,
     totalMinutes,
     employeeId,
+    source,
+    earliestPunchInTime:
+      status === 'checked-in' && earliestPunchInIso && sessionAnchorIso && earliestPunchInIso !== sessionAnchorIso
+        ? earliestPunchInIso
+        : null,
   };
 
   if (cache) cache.map.set(cacheKey, { ts: nowTs, data });
