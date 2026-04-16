@@ -31,29 +31,100 @@ async function getMachinePunchForEmployee({ employeeId, company, dateYmd }) {
 
   // employee_details is stored in login DB (admin) collection employee_details
   const usersCol = await getUsersCollection(null, company);
-  const emp = await usersCol.findOne({ company, employeeId }, { projection: { emp_code: 1, name: 1 } });
+  const employeeKey = String(employeeId).trim();
+  const escapeRe = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const emp = await usersCol.findOne(
+    {
+      company,
+      $or: [
+        { employeeId: employeeKey },
+        { employeeId: new RegExp(`^${escapeRe(employeeKey)}$`, 'i') },
+        // Some flows store employeeId as full email; allow lookup by prefix.
+        { email: new RegExp(`^${escapeRe(employeeKey)}(@|$)`, 'i') },
+      ],
+    },
+    { projection: { emp_code: 1, name: 1, employeeId: 1, email: 1 } }
+  );
   const empCode = emp?.emp_code != null && String(emp.emp_code).trim() !== '' ? String(emp.emp_code).trim() : null;
   if (!empCode) return null;
 
-  const loginDb = await getDb(LOGIN_DB_NAME);
-  const col = loginDb.collection('machine _attendance_reports');
+  if (process.env.DEBUG_CHECKIN_MACHINE === 'true') {
+    console.log('[checkin/machine] employee match', {
+      employeeId,
+      company,
+      empCode,
+      dateYmd,
+    });
+  }
+
+  const empCodeStr = String(empCode).trim();
+  const empCodeNum = Number(empCodeStr);
+  const empCodeNoLeadingZeros = empCodeStr.replace(/^0+/, '') || '0';
+  const empCodeCandidates = Array.from(
+    new Set([
+      empCodeStr,
+      empCodeNoLeadingZeros,
+      Number.isFinite(empCodeNum) ? empCodeNum : null,
+      Number.isFinite(empCodeNum) ? String(empCodeNum) : null,
+    ].filter((v) => v !== null && v !== undefined && String(v).trim() !== ''))
+  );
+
+  // Machine attendance has historically existed under multiple DB + collection names.
+  // Try common candidates so biometric punches reliably reflect in status API.
+  const dbNamesToTry = Array.from(new Set([LOGIN_DB_NAME, 'main_db'].filter((n) => n && String(n).trim() !== '')));
+  const collectionNamesToTry = ['machine_attendance_reports', 'machine _attendance_reports'];
 
   // In this DB, `date` is sometimes stored as Date and sometimes as string.
   const start = new Date(`${dateYmd}T00:00:00.000Z`);
   const end = new Date(`${dateYmd}T23:59:59.999Z`);
 
-  const doc = await col.findOne(
-    {
-      emp_code: { $in: [Number(empCode), empCode] },
-      $or: [
-        { date: { $gte: start, $lte: end } },
-        { date: new RegExp(`^${dateYmd}`) },
-        { date: dateYmd },
-        { date: `${dateYmd}T00:00:00.000Z` },
-      ],
-    },
-    { projection: { punch_in: 1, punch_out: 1, status: 1, date: 1 } }
-  );
+  if (process.env.DEBUG_CHECKIN_MACHINE === 'true') {
+    console.log('[checkin/machine] lookup targets', { dbNamesToTry, collectionNamesToTry });
+  }
+
+  let doc = null;
+  for (const dbName of dbNamesToTry) {
+    if (doc) break;
+    try {
+      const db = await getDb(dbName);
+      for (const colName of collectionNamesToTry) {
+        try {
+          if (process.env.DEBUG_CHECKIN_MACHINE === 'true') {
+            console.log('[checkin/machine] trying', { dbName, colName });
+          }
+          const col = db.collection(colName);
+          doc = await col.findOne(
+            {
+              emp_code: { $in: empCodeCandidates },
+              // Only consider records that actually have a punch-in time.
+              punch_in: { $exists: true, $ne: '' },
+              $or: [
+                { date: { $gte: start, $lte: end } },
+                { date: new RegExp(`^${dateYmd}`) },
+                { date: dateYmd },
+                { date: `${dateYmd}T00:00:00.000Z` },
+              ],
+            },
+            { projection: { punch_in: 1, punch_out: 1, status: 1, date: 1 } }
+          );
+          if (!doc && process.env.DEBUG_CHECKIN_MACHINE === 'true') {
+            console.log('[checkin/machine] no doc in', { dbName, colName, empCodeCandidates, dateYmd });
+          }
+        } catch (_e) {
+          // ignore missing collections or access issues and continue
+          if (process.env.DEBUG_CHECKIN_MACHINE === 'true') {
+            console.log('[checkin/machine] query error in', { dbName, colName, message: _e?.message });
+          }
+        }
+        if (doc) break;
+      }
+    } catch (e) {
+      // Ignore missing DB/collection and keep trying fallbacks.
+      if (process.env.DEBUG_CHECKIN_MACHINE === 'true') {
+        console.log('[checkin/machine] db error', { dbName, message: e?.message });
+      }
+    }
+  }
   if (!doc) return null;
 
   const hasPunchIn = doc.punch_in != null && String(doc.punch_in).trim() !== '';

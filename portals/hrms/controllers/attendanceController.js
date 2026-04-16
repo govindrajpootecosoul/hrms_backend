@@ -353,7 +353,15 @@ async function listAttendance(req, res) {
       }
     }
 
-    const attendanceRecords = Array.from(mergedByEmpCode.values()).sort((a, b) => {
+    const normalizeDept = (v) => String(v || '').trim().toLowerCase();
+    const requestedDept = normalizeDept(department);
+
+    const attendanceRecords = Array.from(mergedByEmpCode.values())
+      .filter((r) => {
+        if (!requestedDept || requestedDept === 'all') return true;
+        return normalizeDept(r.department || 'General') === requestedDept;
+      })
+      .sort((a, b) => {
       // show latest check-in first if available
       if (a.timeIn && b.timeIn) return a.timeIn < b.timeIn ? 1 : -1;
       if (a.timeIn) return -1;
@@ -384,6 +392,7 @@ async function attendanceStats(req, res) {
     if (!effectiveCompany) return;
     await connectMongo();
     const date = firstQueryValue(req.query.date, new Date().toISOString().split('T')[0]);
+    const department = firstQueryValue(req.query.department, 'all');
     
     const db = await getEmployeeDbForHrms(effectiveCompany);
     let col = db.collection('employee_checkins');
@@ -391,13 +400,34 @@ async function attendanceStats(req, res) {
     const { getUsersCollection } = require('../../../config/mongo');
     const companyName = effectiveCompany;
     let totalEmployees = 0;
+    let activeEmployees = 0;
+    let inactiveEmployees = 0;
     let employeesList = [];
     try {
       const usersCol = await getUsersCollection(null, companyName);
       // IMPORTANT: employee_details is in main_db, but must be filtered by company
-      employeesList = await usersCol.find({ company: companyName }).toArray();
-      totalEmployees = employeesList.length;
-      console.log(`[attendance/stats] Total employees: ${totalEmployees} for company: ${companyName}`);
+      const allEmployees = await usersCol.find({ company: companyName }).toArray();
+
+      const normalizeDept = (v) => String(v || '').trim().toLowerCase();
+      const requestedDept = normalizeDept(department);
+      const scoped =
+        requestedDept && requestedDept !== 'all'
+          ? allEmployees.filter((e) => normalizeDept(e.department || 'General') === requestedDept)
+          : allEmployees;
+
+      // Determine active/inactive. Admin module uses `isActive`; some records may use `active`.
+      const isEmployeeActive = (e) => e?.isActive !== false && e?.active !== false;
+      const activeList = scoped.filter(isEmployeeActive);
+      const inactiveList = scoped.filter((e) => !isEmployeeActive(e));
+
+      // For dashboard headcount: show totals with proper active/inactive breakdown.
+      employeesList = activeList;
+      activeEmployees = activeList.length;
+      inactiveEmployees = inactiveList.length;
+      totalEmployees = scoped.length;
+      console.log(
+        `[attendance/stats] Employees (total=${totalEmployees}, active=${activeEmployees}, inactive=${inactiveEmployees}) for company: ${companyName}${department && department !== 'all' ? ` (department: ${department})` : ''}`
+      );
     } catch (err) {
       console.error(`[attendance/stats] Error getting employees for ${companyName}:`, err);
       return res.status(500).json({ success: false, error: 'Failed to load attendance stats for this company.' });
@@ -414,9 +444,11 @@ async function attendanceStats(req, res) {
     // Build employeeId mapping - map all possible employeeId formats to a canonical form
     const employeeIdMap = new Map(); // Maps any employeeId format to canonical employeeId
     const empCodeToCanonicalId = new Map(); // emp_code -> canonical employeeId
+    const scopedCanonicalIds = new Set(); // only employees in current scope (department filter)
     employeesList.forEach(emp => {
       const canonicalId = emp.employeeId || emp.email?.split('@')[0] || '';
       if (canonicalId) {
+        scopedCanonicalIds.add(canonicalId);
         // Map the canonical ID to itself
         employeeIdMap.set(canonicalId, canonicalId);
         // Also map email prefix if different
@@ -510,6 +542,7 @@ async function attendanceStats(req, res) {
         if (!empCode) continue;
         const canonicalId = empCodeToCanonicalId.get(empCode);
         if (!canonicalId) continue;
+        if (!scopedCanonicalIds.has(canonicalId)) continue;
 
         const checkInTime = timeHmToDate(date, r.punch_in ? String(r.punch_in) : null);
         const checkOutTime = timeHmToDate(date, r.punch_out ? String(r.punch_out) : null);
@@ -588,6 +621,7 @@ async function attendanceStats(req, res) {
                   normalizedLeaveId = leaveEmpId;
                 }
               }
+              if (!scopedCanonicalIds.has(normalizedLeaveId)) return;
               onLeaveEmployees.add(normalizedLeaveId);
             }
           } catch (e) {
@@ -635,7 +669,7 @@ async function attendanceStats(req, res) {
               normalizedId = c.employeeId;
             }
           }
-          
+          if (!scopedCanonicalIds.has(normalizedId)) return;
           wfhEmployees.add(normalizedId);
           console.log(`[attendance/stats] Found WFH check-in for employee: ${c.employeeId} (normalized: ${normalizedId})`);
         }
@@ -677,6 +711,7 @@ async function attendanceStats(req, res) {
                   normalizedId = reqEmpId;
                 }
               }
+              if (!scopedCanonicalIds.has(normalizedId)) return;
               wfhEmployees.add(normalizedId);
               console.log(`[attendance/stats] Found WFH request for employee: ${reqEmpId} (normalized: ${normalizedId})`);
             }
@@ -727,7 +762,7 @@ async function attendanceStats(req, res) {
           }
           
           // Only add if not WFH and not on leave
-          if (!wfhEmployees.has(normalizedId) && !onLeaveEmployees.has(normalizedId)) {
+          if (scopedCanonicalIds.has(normalizedId) && !wfhEmployees.has(normalizedId) && !onLeaveEmployees.has(normalizedId)) {
             presentEmployees.add(normalizedId);
             console.log(`[attendance/stats] Found present check-in for employee: ${c.employeeId} (normalized: ${normalizedId}), checkInTime: ${c.checkInTime}`);
           }
@@ -738,8 +773,8 @@ async function attendanceStats(req, res) {
     
     console.log(`[attendance/stats] Present employees (excluding WFH and Leave): ${presentCount}`, Array.from(presentEmployees));
 
-    // Calculate absent count: Total employees - Present - On Leave - WFH
-    const absentCount = Math.max(0, totalEmployees - presentCount - onLeaveCount - onWFHCount);
+    // Calculate absent count based on ACTIVE employees only.
+    const absentCount = Math.max(0, activeEmployees - presentCount - onLeaveCount - onWFHCount);
 
     // Count late check-ins (check-in after 9:00 AM)
     const lateCheckIns = todayCheckIns.filter(c => {
@@ -774,6 +809,8 @@ async function attendanceStats(req, res) {
       success: true,
       data: {
         totalEmployees: totalEmployees || 0,
+        activeEmployees: activeEmployees || 0,
+        inactiveEmployees: inactiveEmployees || 0,
         presentToday: presentCount,
         absentToday: absentCount,
         onLeaveToday: onLeaveCount,

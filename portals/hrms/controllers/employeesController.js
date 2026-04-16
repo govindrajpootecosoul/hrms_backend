@@ -40,7 +40,17 @@ async function listEmployees(req, res) {
     }
     
     if (status) {
-      query.status = status;
+      const s = String(status).trim().toLowerCase();
+      // DB uses isActive/active flags (admin portal), not a `status` string.
+      // Interpret common values.
+      if (s === 'active' || s === 'current') {
+        query.isActive = { $ne: false };
+      } else if (s === 'inactive' || s === 'ex' || s === 'terminated' || s === 'resigned') {
+        query.isActive = false;
+      } else {
+        // Backward-compat: if some collections truly store status as string.
+        query.status = status;
+      }
     }
     
     // Fetch employees

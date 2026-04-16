@@ -180,6 +180,14 @@ async function getDb(dbName = null) {
 async function getUsersCollection(email = null, company = null) {
   // For login/users, use the configured login database (main_db)
   const db = await getDb(LOGIN_DB_NAME);
+  // Backward compatibility: legacy deployments use `employee_details` (not `users`).
+  try {
+    const existing = new Set((await db.listCollections().toArray()).map((c) => c.name));
+    if (existing.has(USERS_COLLECTION)) return db.collection(USERS_COLLECTION);
+    if (existing.has('employee_details')) return db.collection('employee_details');
+  } catch (_e) {
+    // fall through
+  }
   return db.collection(USERS_COLLECTION);
 }
 
