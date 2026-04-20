@@ -106,6 +106,13 @@ function normalizeEmpCode(value) {
   return s ? s : null;
 }
 
+function yyyyMmDdLocal(d) {
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  const dd = String(d.getDate()).padStart(2, '0');
+  return `${yyyy}-${mm}-${dd}`;
+}
+
 async function getMachineAttendanceForDay(dateStr) {
   const range = getUtcDayRange(dateStr);
   if (!range) return [];
@@ -388,6 +395,7 @@ async function listAttendance(req, res) {
 
 async function attendanceStats(req, res) {
   try {
+    const crypto = require('crypto');
     const effectiveCompany = requireCompany(req, res);
     if (!effectiveCompany) return;
     await connectMongo();
@@ -799,11 +807,32 @@ async function attendanceStats(req, res) {
       pendingRequests
     });
 
-    // Set no-cache headers to prevent caching
-    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
-    res.setHeader('Pragma', 'no-cache');
-    res.setHeader('Expires', '0');
-    res.setHeader('X-Timestamp', Date.now().toString());
+    // Change detection (ETag): lets clients poll but only download/process JSON when data changes.
+    // We include only the derived stats (plus request scope) so a change in any underlying records
+    // naturally changes the tag.
+    const etagSource = JSON.stringify({
+      company: companyName || null,
+      date,
+      department: department || 'all',
+      totalEmployees: totalEmployees || 0,
+      activeEmployees: activeEmployees || 0,
+      inactiveEmployees: inactiveEmployees || 0,
+      presentToday: presentCount,
+      absentToday: absentCount,
+      onLeaveToday: onLeaveCount,
+      onWFHToday: onWFHCount,
+      lateCheckIns,
+      leaveApprovals: pendingRequests,
+    });
+    const etag = `"${crypto.createHash('sha1').update(etagSource).digest('hex')}"`;
+
+    // Encourage revalidation (not storage). If unchanged and client sends If-None-Match, return 304.
+    res.setHeader('ETag', etag);
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Vary', 'Origin, If-None-Match');
+    if (req.headers && req.headers['if-none-match'] === etag) {
+      return res.status(304).end();
+    }
     
     res.json({
       success: true,
@@ -829,7 +858,540 @@ async function attendanceStats(req, res) {
   }
 }
 
+async function attendanceStatsByDepartment(req, res) {
+  try {
+    const crypto = require('crypto');
+    const effectiveCompany = requireCompany(req, res);
+    if (!effectiveCompany) return;
+    await connectMongo();
+
+    const date = firstQueryValue(req.query.date, new Date().toISOString().split('T')[0]);
+    const departmentFilter = firstQueryValue(req.query.department, 'all'); // optional
+
+    const db = await getEmployeeDbForHrms(effectiveCompany);
+    const checkinsCol = db.collection('employee_checkins');
+    const requestsCol = db.collection('attendance_requests');
+
+    const { getUsersCollection } = require('../../../config/mongo');
+    const companyName = effectiveCompany;
+
+    // 1) Load employees once and group by department (active only for attendance math).
+    const usersCol = await getUsersCollection(null, companyName);
+    const allEmployees = await usersCol.find({ company: companyName }).toArray();
+
+    const normalizeDept = (v) => String(v || '').trim().toLowerCase();
+    const requestedDept = normalizeDept(departmentFilter);
+
+    const isEmployeeActive = (e) => e?.isActive !== false && e?.active !== false;
+
+    const employeeMeta = new Map(); // canonicalId -> { deptKey, isActive }
+    const employeeIdMap = new Map(); // anyId -> canonicalId
+    const empCodeToCanonicalId = new Map(); // emp_code -> canonicalId
+
+    for (const emp of allEmployees) {
+      const deptKey = normalizeDept(emp.department || 'General') || 'general';
+      if (requestedDept && requestedDept !== 'all' && deptKey !== requestedDept) {
+        // still map ids for normalization (safe), but do not count in scoped sets unless matches
+      }
+
+      const canonicalId = emp.employeeId || emp.email?.split('@')[0] || '';
+      if (canonicalId) {
+        employeeMeta.set(canonicalId, { deptKey, isActive: isEmployeeActive(emp) });
+        employeeIdMap.set(canonicalId, canonicalId);
+        if (emp.employeeId) employeeIdMap.set(emp.employeeId, canonicalId);
+        if (emp.email) {
+          employeeIdMap.set(emp.email, canonicalId);
+          employeeIdMap.set(emp.email.split('@')[0], canonicalId);
+        }
+      }
+
+      const empCode = normalizeEmpCode(emp.emp_code);
+      if (empCode && canonicalId) {
+        empCodeToCanonicalId.set(empCode, canonicalId);
+      }
+    }
+
+    // Precompute active counts per dept
+    const deptActive = new Map();
+    const deptTotal = new Map();
+    for (const [cid, meta] of employeeMeta.entries()) {
+      if (!meta?.deptKey) continue;
+      deptTotal.set(meta.deptKey, (deptTotal.get(meta.deptKey) || 0) + 1);
+      if (meta.isActive) deptActive.set(meta.deptKey, (deptActive.get(meta.deptKey) || 0) + 1);
+    }
+
+    // 2) Load check-ins for the day (date or fallback range)
+    let todayCheckIns = await checkinsCol.find({ date }).toArray();
+    if (todayCheckIns.length === 0) {
+      const todayDate = new Date(date);
+      if (isValidDate(todayDate)) {
+        const startOfDay = new Date(todayDate);
+        startOfDay.setHours(0, 0, 0, 0);
+        const endOfDay = new Date(todayDate);
+        endOfDay.setHours(23, 59, 59, 999);
+        todayCheckIns = await checkinsCol
+          .find({ checkInTime: { $gte: startOfDay, $lte: endOfDay } })
+          .toArray();
+      }
+    }
+
+    // 3) Merge machine attendance as synthetic check-ins (same idea as attendanceStats)
+    try {
+      const machineReports = await getMachineAttendanceForDay(date);
+      const machinePresent = machineReports.filter((r) => {
+        const st = String(r.status || '').toLowerCase();
+        const hasIn = r.punch_in != null && String(r.punch_in).trim() !== '';
+        return (st === 'present' || st === 'mis') && hasIn;
+      });
+      for (const r of machinePresent) {
+        const empCode = normalizeEmpCode(r.emp_code);
+        if (!empCode) continue;
+        const canonicalId = empCodeToCanonicalId.get(empCode);
+        if (!canonicalId) continue;
+        const meta = employeeMeta.get(canonicalId);
+        if (!meta?.isActive) continue;
+        if (requestedDept && requestedDept !== 'all' && meta.deptKey !== requestedDept) continue;
+
+        const checkInTime = timeHmToDate(date, r.punch_in ? String(r.punch_in) : null);
+        const checkOutTime = timeHmToDate(date, r.punch_out ? String(r.punch_out) : null);
+        if (!checkInTime) continue;
+
+        const already = todayCheckIns.some((c) => {
+          if (!c || !c.employeeId) return false;
+          const normalized = employeeIdMap.get(c.employeeId) || c.employeeId;
+          return normalized === canonicalId;
+        });
+        if (already) continue;
+
+        todayCheckIns.push({
+          employeeId: canonicalId,
+          checkInTime,
+          checkOutTime,
+          date,
+          source: 'machine',
+        });
+      }
+    } catch {
+      // non-fatal
+    }
+
+    // 4) Leaves + WFH requests for that day
+    const onLeaveByDept = new Map(); // deptKey -> Set(canonicalId)
+    const wfhByDept = new Map(); // deptKey -> Set(canonicalId)
+
+    const addToDeptSet = (map, deptKey, canonicalId) => {
+      if (!deptKey || !canonicalId) return;
+      if (!map.has(deptKey)) map.set(deptKey, new Set());
+      map.get(deptKey).add(canonicalId);
+    };
+
+    const approvedLeaves = await requestsCol
+      .find({ type: 'time-off', status: 'approved', ...(companyName ? { company: companyName } : {}) })
+      .toArray();
+    for (const leave of approvedLeaves) {
+      const rangeParts = splitDateRangeParts(leave.dateRange);
+      if (!rangeParts) continue;
+      try {
+        const fromDate = new Date(rangeParts[0].trim());
+        const toDate = new Date(rangeParts[1].trim());
+        const todayDate = new Date(date);
+        fromDate.setHours(0, 0, 0, 0);
+        toDate.setHours(0, 0, 0, 0);
+        todayDate.setHours(0, 0, 0, 0);
+        if (!(todayDate >= fromDate && todayDate <= toDate)) continue;
+
+        const leaveEmpId = leave.employeeId;
+        const canonicalId = employeeIdMap.get(leaveEmpId) || leaveEmpId;
+        const meta = employeeMeta.get(canonicalId);
+        if (!meta?.isActive) continue;
+        if (requestedDept && requestedDept !== 'all' && meta.deptKey !== requestedDept) continue;
+        addToDeptSet(onLeaveByDept, meta.deptKey, canonicalId);
+      } catch {
+        // ignore bad date ranges
+      }
+    }
+
+    const wfhRequests = await requestsCol
+      .find({
+        type: { $in: ['wfh', 'WFH', 'work-from-home', 'work from home'] },
+        status: 'approved',
+        ...(companyName ? { company: companyName } : {}),
+      })
+      .toArray();
+    for (const req0 of wfhRequests) {
+      const parts = splitDateRangeParts(req0.dateRange);
+      if (!parts) continue;
+      try {
+        const fromDate = new Date(parts[0].trim());
+        const toDate = new Date(parts[1].trim());
+        const todayDate = new Date(date);
+        fromDate.setHours(0, 0, 0, 0);
+        toDate.setHours(0, 0, 0, 0);
+        todayDate.setHours(0, 0, 0, 0);
+        if (!(todayDate >= fromDate && todayDate <= toDate)) continue;
+
+        const empId = req0.employeeId;
+        const canonicalId = employeeIdMap.get(empId) || empId;
+        const meta = employeeMeta.get(canonicalId);
+        if (!meta?.isActive) continue;
+        if (requestedDept && requestedDept !== 'all' && meta.deptKey !== requestedDept) continue;
+        addToDeptSet(wfhByDept, meta.deptKey, canonicalId);
+      } catch {
+        // ignore
+      }
+    }
+
+    // 5) Present/WFH from check-ins
+    const presentByDept = new Map(); // deptKey -> Set(canonicalId)
+    const lateByDept = new Map(); // deptKey -> number
+    const seenLateKey = new Set(); // deptKey|canonicalId to avoid dup counting
+
+    const isWFHCheckin = (c) =>
+      c?.status === 'wfh' ||
+      c?.status === 'WFH' ||
+      c?.location === 'remote' ||
+      c?.location === 'WFH' ||
+      c?.location === 'wfh' ||
+      c?.workMode === 'WFH' ||
+      c?.workMode === 'wfh';
+
+    for (const c of todayCheckIns) {
+      if (!c || !c.employeeId || !c.checkInTime) continue;
+      const canonicalId = employeeIdMap.get(c.employeeId) || c.employeeId;
+      const meta = employeeMeta.get(canonicalId);
+      if (!meta?.isActive) continue;
+      if (requestedDept && requestedDept !== 'all' && meta.deptKey !== requestedDept) continue;
+
+      const deptKey = meta.deptKey;
+      if (isWFHCheckin(c)) {
+        addToDeptSet(wfhByDept, deptKey, canonicalId);
+        continue;
+      }
+
+      // Present excludes WFH + leave
+      const leaveSet = onLeaveByDept.get(deptKey);
+      const wfhSet = wfhByDept.get(deptKey);
+      if (leaveSet && leaveSet.has(canonicalId)) continue;
+      if (wfhSet && wfhSet.has(canonicalId)) continue;
+      addToDeptSet(presentByDept, deptKey, canonicalId);
+
+      const checkInTime = parseCheckTime(c.checkInTime);
+      if (checkInTime && isLateByPunchIn(checkInTime)) {
+        const k = `${deptKey}::${canonicalId}`;
+        if (!seenLateKey.has(k)) {
+          seenLateKey.add(k);
+          lateByDept.set(deptKey, (lateByDept.get(deptKey) || 0) + 1);
+        }
+      }
+    }
+
+    // 6) Build final stats map
+    const allDeptKeys = Array.from(
+      new Set([
+        ...deptTotal.keys(),
+        ...deptActive.keys(),
+        ...presentByDept.keys(),
+        ...onLeaveByDept.keys(),
+        ...wfhByDept.keys(),
+      ])
+    );
+
+    const byDepartment = {};
+    for (const deptKey of allDeptKeys) {
+      const totalEmployees = deptTotal.get(deptKey) || 0;
+      const activeEmployees = deptActive.get(deptKey) || 0;
+      const presentToday = presentByDept.get(deptKey)?.size || 0;
+      const onLeaveToday = onLeaveByDept.get(deptKey)?.size || 0;
+      const onWFHToday = wfhByDept.get(deptKey)?.size || 0;
+      const absentToday = Math.max(0, activeEmployees - presentToday - onLeaveToday - onWFHToday);
+      const lateCheckIns = lateByDept.get(deptKey) || 0;
+
+      byDepartment[deptKey] = {
+        department: deptKey,
+        totalEmployees,
+        activeEmployees,
+        presentToday,
+        absentToday,
+        onLeaveToday,
+        onWFHToday,
+        lateCheckIns,
+      };
+    }
+
+    const etagSource = JSON.stringify({
+      company: companyName || null,
+      date,
+      department: departmentFilter || 'all',
+      byDepartment,
+    });
+    const etag = `"${crypto.createHash('sha1').update(etagSource).digest('hex')}"`;
+    res.setHeader('ETag', etag);
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Vary', 'Origin, If-None-Match');
+    if (req.headers && req.headers['if-none-match'] === etag) {
+      return res.status(304).end();
+    }
+
+    // Return department keys as originally cased isn't available; frontend can display title-cased if needed.
+    return res.json({
+      success: true,
+      data: {
+        date,
+        company: companyName,
+        departmentFilter: departmentFilter || 'all',
+        byDepartment,
+      },
+    });
+  } catch (error) {
+    console.error('HRMS attendance stats by-department error:', error);
+    return res.status(500).json({
+      success: false,
+      error: process.env.NODE_ENV === 'development' ? error.message || 'Internal server error' : 'Internal server error',
+    });
+  }
+}
+
+async function attendanceStatsTrends(req, res) {
+  try {
+    const crypto = require('crypto');
+    const effectiveCompany = requireCompany(req, res);
+    if (!effectiveCompany) return;
+    await connectMongo();
+
+    const endDateStr = firstQueryValue(req.query.endDate, new Date().toISOString().split('T')[0]);
+    const daysRaw = firstQueryValue(req.query.days, '7');
+    const days = Math.max(1, Math.min(31, parseInt(daysRaw, 10) || 7));
+    const departmentFilter = firstQueryValue(req.query.department, 'all'); // optional
+
+    const endDate = new Date(endDateStr);
+    if (!isValidDate(endDate)) {
+      return res.status(400).json({ success: false, error: 'Invalid endDate (expected YYYY-MM-DD)' });
+    }
+
+    const db = await getEmployeeDbForHrms(effectiveCompany);
+    const checkinsCol = db.collection('employee_checkins');
+    const requestsCol = db.collection('attendance_requests');
+
+    const { getUsersCollection } = require('../../../config/mongo');
+    const companyName = effectiveCompany;
+
+    const usersCol = await getUsersCollection(null, companyName);
+    const allEmployees = await usersCol.find({ company: companyName }).toArray();
+
+    const normalizeDept = (v) => String(v || '').trim().toLowerCase();
+    const requestedDept = normalizeDept(departmentFilter);
+    const isEmployeeActive = (e) => e?.isActive !== false && e?.active !== false;
+
+    // Build employee maps once (reuse across all days)
+    const employeeMeta = new Map(); // canonicalId -> { deptKey, isActive }
+    const employeeIdMap = new Map(); // anyId -> canonicalId
+    const empCodeToCanonicalId = new Map(); // emp_code -> canonicalId
+
+    for (const emp of allEmployees) {
+      const deptKey = normalizeDept(emp.department || 'General') || 'general';
+      const canonicalId = emp.employeeId || emp.email?.split('@')[0] || '';
+      if (canonicalId) {
+        employeeMeta.set(canonicalId, { deptKey, isActive: isEmployeeActive(emp) });
+        employeeIdMap.set(canonicalId, canonicalId);
+        if (emp.employeeId) employeeIdMap.set(emp.employeeId, canonicalId);
+        if (emp.email) {
+          employeeIdMap.set(emp.email, canonicalId);
+          employeeIdMap.set(emp.email.split('@')[0], canonicalId);
+        }
+      }
+      const empCode = normalizeEmpCode(emp.emp_code);
+      if (empCode && canonicalId) empCodeToCanonicalId.set(empCode, canonicalId);
+    }
+
+    const matchesDept = (meta) =>
+      !requestedDept || requestedDept === 'all' ? true : meta?.deptKey === requestedDept;
+
+    const activeEmployeesBase = Array.from(employeeMeta.values()).filter((m) => m?.isActive && matchesDept(m)).length;
+    const totalEmployeesBase = Array.from(employeeMeta.values()).filter((m) => matchesDept(m)).length;
+
+    // Preload approved leave + wfh requests once, filter per day.
+    const approvedLeaves = await requestsCol
+      .find({ type: 'time-off', status: 'approved', ...(companyName ? { company: companyName } : {}) })
+      .toArray();
+    const approvedWfh = await requestsCol
+      .find({
+        type: { $in: ['wfh', 'WFH', 'work-from-home', 'work from home'] },
+        status: 'approved',
+        ...(companyName ? { company: companyName } : {}),
+      })
+      .toArray();
+
+    const parseRange = (req0) => {
+      const parts = splitDateRangeParts(req0?.dateRange);
+      if (!parts) return null;
+      const from = new Date(parts[0].trim());
+      const to = new Date(parts[1].trim());
+      if (!isValidDate(from) || !isValidDate(to)) return null;
+      from.setHours(0, 0, 0, 0);
+      to.setHours(0, 0, 0, 0);
+      return { from, to };
+    };
+
+    const isWFHCheckin = (c) =>
+      c?.status === 'wfh' ||
+      c?.status === 'WFH' ||
+      c?.location === 'remote' ||
+      c?.location === 'WFH' ||
+      c?.location === 'wfh' ||
+      c?.workMode === 'WFH' ||
+      c?.workMode === 'wfh';
+
+    const trends = [];
+    for (let i = days - 1; i >= 0; i--) {
+      const d = new Date(endDate);
+      d.setDate(endDate.getDate() - i);
+      const dateStr = yyyyMmDdLocal(d);
+
+      // Check-ins for the day
+      let todayCheckIns = await checkinsCol.find({ date: dateStr }).toArray();
+      if (todayCheckIns.length === 0) {
+        const todayDate = new Date(dateStr);
+        if (isValidDate(todayDate)) {
+          const startOfDay = new Date(todayDate);
+          startOfDay.setHours(0, 0, 0, 0);
+          const endOfDay = new Date(todayDate);
+          endOfDay.setHours(23, 59, 59, 999);
+          todayCheckIns = await checkinsCol
+            .find({ checkInTime: { $gte: startOfDay, $lte: endOfDay } })
+            .toArray();
+        }
+      }
+
+      // Merge machine attendance
+      try {
+        const machineReports = await getMachineAttendanceForDay(dateStr);
+        const machinePresent = machineReports.filter((r) => {
+          const st = String(r.status || '').toLowerCase();
+          const hasIn = r.punch_in != null && String(r.punch_in).trim() !== '';
+          return (st === 'present' || st === 'mis') && hasIn;
+        });
+        for (const r of machinePresent) {
+          const empCode = normalizeEmpCode(r.emp_code);
+          if (!empCode) continue;
+          const canonicalId = empCodeToCanonicalId.get(empCode);
+          if (!canonicalId) continue;
+          const meta = employeeMeta.get(canonicalId);
+          if (!meta?.isActive || !matchesDept(meta)) continue;
+          const checkInTime = timeHmToDate(dateStr, r.punch_in ? String(r.punch_in) : null);
+          const checkOutTime = timeHmToDate(dateStr, r.punch_out ? String(r.punch_out) : null);
+          if (!checkInTime) continue;
+          const already = todayCheckIns.some((c) => (employeeIdMap.get(c?.employeeId) || c?.employeeId) === canonicalId);
+          if (already) continue;
+          todayCheckIns.push({ employeeId: canonicalId, checkInTime, checkOutTime, date: dateStr, source: 'machine' });
+        }
+      } catch {
+        // ignore
+      }
+
+      // On leave + WFH sets
+      const day0 = new Date(dateStr);
+      day0.setHours(0, 0, 0, 0);
+      const onLeave = new Set();
+      for (const leave of approvedLeaves) {
+        const range = parseRange(leave);
+        if (!range) continue;
+        if (!(day0 >= range.from && day0 <= range.to)) continue;
+        const canonicalId = employeeIdMap.get(leave.employeeId) || leave.employeeId;
+        const meta = employeeMeta.get(canonicalId);
+        if (!meta?.isActive || !matchesDept(meta)) continue;
+        onLeave.add(canonicalId);
+      }
+
+      const wfh = new Set();
+      for (const w of approvedWfh) {
+        const range = parseRange(w);
+        if (!range) continue;
+        if (!(day0 >= range.from && day0 <= range.to)) continue;
+        const canonicalId = employeeIdMap.get(w.employeeId) || w.employeeId;
+        const meta = employeeMeta.get(canonicalId);
+        if (!meta?.isActive || !matchesDept(meta)) continue;
+        wfh.add(canonicalId);
+      }
+
+      // Present excludes WFH + leave
+      const present = new Set();
+      let lateCheckIns = 0;
+      const countedLate = new Set();
+      for (const c of todayCheckIns) {
+        if (!c?.employeeId || !c?.checkInTime) continue;
+        const canonicalId = employeeIdMap.get(c.employeeId) || c.employeeId;
+        const meta = employeeMeta.get(canonicalId);
+        if (!meta?.isActive || !matchesDept(meta)) continue;
+        if (isWFHCheckin(c)) {
+          wfh.add(canonicalId);
+          continue;
+        }
+        if (onLeave.has(canonicalId) || wfh.has(canonicalId)) continue;
+        present.add(canonicalId);
+
+        const t = parseCheckTime(c.checkInTime);
+        if (t && isLateByPunchIn(t)) {
+          if (!countedLate.has(canonicalId)) {
+            countedLate.add(canonicalId);
+            lateCheckIns += 1;
+          }
+        }
+      }
+
+      const onLeaveCount = onLeave.size;
+      const onWFHCount = wfh.size;
+      const presentCount = present.size;
+      const absentCount = Math.max(0, activeEmployeesBase - presentCount - onLeaveCount - onWFHCount);
+
+      trends.push({
+        date: dateStr,
+        totalEmployees: totalEmployeesBase,
+        activeEmployees: activeEmployeesBase,
+        presentToday: presentCount,
+        absentToday: absentCount,
+        onLeaveToday: onLeaveCount,
+        onWFHToday: onWFHCount,
+        lateCheckIns,
+      });
+    }
+
+    const etagSource = JSON.stringify({
+      company: companyName || null,
+      endDate: endDateStr,
+      days,
+      department: departmentFilter || 'all',
+      trends,
+    });
+    const etag = `"${crypto.createHash('sha1').update(etagSource).digest('hex')}"`;
+    res.setHeader('ETag', etag);
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Vary', 'Origin, If-None-Match');
+    if (req.headers && req.headers['if-none-match'] === etag) {
+      return res.status(304).end();
+    }
+
+    return res.json({
+      success: true,
+      data: {
+        company: companyName,
+        endDate: endDateStr,
+        days,
+        departmentFilter: departmentFilter || 'all',
+        trends,
+      },
+    });
+  } catch (error) {
+    console.error('HRMS attendance trends error:', error);
+    return res.status(500).json({
+      success: false,
+      error: process.env.NODE_ENV === 'development' ? error.message || 'Internal server error' : 'Internal server error',
+    });
+  }
+}
+
 module.exports = {
   listAttendance,
   attendanceStats,
+  attendanceStatsByDepartment,
+  attendanceStatsTrends,
 };

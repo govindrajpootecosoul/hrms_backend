@@ -50,16 +50,13 @@ function isClientConnected(c) {
 }
 
 function getMongoUriForKey(key) {
-  if (key === 'main') return MAIN_MONGO_URI;
-  if (key === 'thrive') return getMongoUriForCompany('Thrive');
-  return getMongoUriForCompany('Ecosoul Home');
+  // Single MongoDB instance for all DBs (login + company DBs).
+  // Keep key parameter for backward compatibility with existing cache keys.
+  return MAIN_MONGO_URI;
 }
 
 function getClientKeyForDb(dbName) {
-  if (!dbName || dbName === LOGIN_DB_NAME) return 'main';
-  const t = String(dbName).trim().toLowerCase();
-  if (t === 'thrive') return 'thrive';
-  if (t.includes('ecosoul')) return 'ecosoul';
+  // All DBs live on the same MongoDB server now.
   return 'main';
 }
 
@@ -77,9 +74,12 @@ function normalizeCompanyDbName(dbName) {
   if (!raw) return raw;
   const t = raw.toLowerCase();
   if (t === LOGIN_DB_NAME.toLowerCase()) return LOGIN_DB_NAME;
-  if (t === 'thrive' || t.includes('thrive')) return 'thrive';
-  if (t === 'ecosoul' || t.includes('ecosoul') || t.includes('eco soul')) return 'ecosoul';
-  return raw;
+  if (t === 'thrive' || t.includes('thrive'))
+    return (process.env.MONGO_COMPANY_DB_THRIVE || 'thrive').trim();
+  if (t === 'ecosoul' || t.includes('ecosoul') || t.includes('eco soul'))
+    return (process.env.MONGO_COMPANY_DB_ECOSOUL || 'ecosoul').trim();
+  // fallback: sanitize
+  return raw.replace(/\s+/g, '_');
 }
 
 async function ensureClient(key) {
@@ -267,9 +267,10 @@ async function initializePortalDatabaseForDb(portalName, dbName, options = {}) {
 function resolveCompanyDbName(company) {
   if (company == null || String(company).trim() === '') return null;
   const t = String(company).trim().toLowerCase();
-  if (t.includes('thrive')) return 'Thrive';
-  if (t.includes('ecosoul') || t.includes('eco soul')) return 'Ecosoul Home';
-  return String(company).trim();
+  if (t.includes('thrive')) return (process.env.MONGO_COMPANY_DB_THRIVE || 'thrive').trim();
+  if (t.includes('ecosoul') || t.includes('eco soul'))
+    return (process.env.MONGO_COMPANY_DB_ECOSOUL || 'ecosoul').trim();
+  return String(company).trim().replace(/\s+/g, '_');
 }
 
 /** All unique collection names required on a company database (all portals). */

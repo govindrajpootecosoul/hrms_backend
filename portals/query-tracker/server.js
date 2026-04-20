@@ -6,7 +6,7 @@ const dotenv = require('dotenv');
 
 dotenv.config({ path: path.join(__dirname, '..', '..', '.env') });
 require('../../config/network.config');
-const { config, ports, getMongoUri, getBackendUrl } = require('../../config/app.config');
+const { config, getMongoUri } = require('../../config/app.config');
 
 const app = express();
 
@@ -30,7 +30,7 @@ mongoose.connect(queryTrackerUri, {
 .then(() => console.log('MongoDB Connected'))
 .catch(err => console.error('MongoDB connection error:', err));
 
-const PORT = ports.queryTracker;
+const PORT = config.ports.backend;
 
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);

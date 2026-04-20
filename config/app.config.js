@@ -6,14 +6,7 @@ require('dotenv').config();
  */
 
 const { MONGODB_CONFIG, getMongoUri: getDbMongoUri, getDatabaseName, getCollectionName } = require('./database.config');
-
-function requireEnvString(name) {
-  const v = process.env[name];
-  if (v == null || !String(v).trim()) {
-    throw new Error(`${name} must be set in .env file`);
-  }
-  return String(v).trim();
-}
+const { networkConfig } = require('./network.config');
 
 function requireEnvInt(name) {
   const v = process.env[name];
@@ -27,6 +20,12 @@ function requireEnvInt(name) {
   return n;
 }
 
+function trimOrNull(name) {
+  const v = process.env[name];
+  if (v == null || !String(v).trim()) return null;
+  return String(v).trim();
+}
+
 const poolSizeRaw = process.env.DB_POOL_SIZE;
 const poolSize =
   poolSizeRaw != null && String(poolSizeRaw).trim() !== ''
@@ -37,7 +36,6 @@ const config = {
   ports: {
     backend: requireEnvInt('BACKEND_PORT'),
     frontend: requireEnvInt('FRONTEND_PORT'),
-    queryTracker: requireEnvInt('QUERY_TRACKER_PORT'),
   },
 
   mongodb: {
@@ -61,14 +59,14 @@ const config = {
   },
 
   urls: {
-    backendBase: process.env.BACKEND_BASE_URL || null,
-    frontendBase: process.env.FRONTEND_BASE_URL || null,
-    backendApi: process.env.BACKEND_API_URL || null,
-    healthCheck: process.env.HEALTH_CHECK_URL || null,
+    backendBase: trimOrNull('BACKEND_BASE_URL'),
+    frontendBase: trimOrNull('FRONTEND_BASE_URL'),
+    backendApi: trimOrNull('BACKEND_API_URL'),
+    healthCheck: trimOrNull('HEALTH_CHECK_URL'),
   },
 
   network: {
-    serverIp: requireEnvString('SERVER_IP'),
+    serverIp: networkConfig.serverIp,
   },
 
   env: {

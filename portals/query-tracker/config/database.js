@@ -1,5 +1,6 @@
 const mongoose = require('mongoose');
 const { getMongoUriForCompany } = require('../../../config/database.config');
+const { resolveCompanyDbName } = require('../../../config/mongo');
 
 // In the new setup, Query Tracker data is stored inside the company DB (on company Mongo server).
 async function ensureQueryTrackerConnection(company) {
@@ -7,7 +8,7 @@ async function ensureQueryTrackerConnection(company) {
     if (!company) {
       throw new Error('company is required for Query Tracker');
     }
-    const dbName = company;
+    const dbName = resolveCompanyDbName(company);
     const uriBase = getMongoUriForCompany(company);
     const base = uriBase.endsWith('/') ? uriBase : `${uriBase}/`;
     const fullUri = `${base}${encodeURIComponent(dbName)}`;

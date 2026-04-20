@@ -1,5 +1,6 @@
-﻿const { getDb, getEmployeePortalDb } = require('../../../config/mongo');
+const { getDb, getEmployeePortalDb } = require('../../../config/mongo');
 const { ATTENDANCE_REQUESTS } = require('../models');
+const { emitAttendanceChanged } = require('../../../lib/attendanceEvents');
 
 async function getRequestsCollection(company) {
   const db = company ? await getEmployeePortalDb(company) : await getDb();
@@ -68,6 +69,8 @@ async function submitRequest({ employeeId, company, body }) {
   };
 
   const result = await col.insertOne(requestDoc);
+  // Attendance requests can affect dashboard stats once approved (and are visible in pending counts).
+  emitAttendanceChanged({ company, type: 'attendance_request_submitted', date: (date || new Date().toISOString().slice(0, 10)) });
   return { requestId: result.insertedId, type, status: 'pending' };
 }
 

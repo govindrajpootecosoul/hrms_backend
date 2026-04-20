@@ -1,11 +1,14 @@
 const express = require('express');
 const cors = require('cors');
 require('dotenv').config();
+require('./lib/logFilter').installLogFilter();
 
-// Network + env validation before app.config (app.config also requires SERVER_IP, ports, DB, Mongo from .env)
+// Network (BACKEND_PORT) then app config (ports, DB, Mongo from .env)
 require('./config/network.config');
 const { config, ports, getMongoUri, getBackendUrl: getAppBackendUrl } = require('./config/app.config');
-const { networkConfig, getBackendUrl, getApiUrl, backendPort } = require('./config/network.config');
+const { networkConfig, backendPort } = require('./config/network.config');
+const { getCorsOptions } = require('./config/cors.config');
+const { subscribeAttendanceEvents } = require('./lib/attendanceEvents');
 
 // Portals (see /portals/<name>/app.js — shared config/ and this server.js at repo root)
 const { authRoutes, adminUsersRoutes } = require('./portals/admin-portal/app');
@@ -23,14 +26,11 @@ const app = express();
 // Use port from network.config.js (single source of truth)
 const PORT = backendPort;
 
-// Middleware
-// CORS configuration - allow all origins for development
-app.use(cors({
-  origin: true, // Allow all origins
-  credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept']
-}));
+// Middleware — CORS from config/cors.config.js (CORS_ORIGIN / FRONTEND_BASE_URL in production)
+app.use(cors(getCorsOptions()));
+
+// SSE: attendance invalidation stream (push updates; client revalidates via ETag)
+app.get('/api/events/attendance', (req, res) => subscribeAttendanceEvents(req, res));
 
 // Add request logging middleware for debugging
 const ENABLE_REQUEST_LOGS = process.env.REQUEST_LOGS === 'true' || process.env.NODE_ENV !== 'production';
@@ -134,9 +134,8 @@ async function startServer() {
   // Start server
   // Listen on all interfaces (0.0.0.0) to allow network access
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`🚀 Server running on ${getBackendUrl()}`);
-    console.log(`   Network IP: ${networkConfig.serverIp}`);
-    console.log(`   Port: ${PORT}`);
+    console.log(`🚀 Server running — public API base: ${getAppBackendUrl()}`);
+    console.log(`   Resolved host (dev/LAN hint): ${networkConfig.serverIp} | listen port: ${PORT}`);
     console.log(`📝 MongoDB: main/login mongod default :27012; Ecosoul :27013; Thrive :27014 (override with MONGO_HOST / MONGO_URI_*)`);
     console.log(`   Login DB: ${config.mongodb.loginDbName} / ${config.mongodb.usersCollection}`);
     console.log(`   Company portal data: DB name per company on MONGO_URI_ECOSOUL / MONGO_URI_THRIVE (defaults :27013 / :27014)`);

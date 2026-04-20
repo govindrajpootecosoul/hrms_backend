@@ -10,6 +10,7 @@ const {
   getAllHrmsDbs,
   getEmployeeDbForHrms,
 } = require('../utils/hrmsContext');
+const { emitAttendanceChanged } = require('../../../lib/attendanceEvents');
 
 async function listLeaves(req, res) {
   try {
@@ -435,6 +436,7 @@ async function approveAttendanceRequest(req, res) {
     }
 
     console.log(`[hrms-portal] ✅ Attendance request ${requestId} approved by ${approvedBy || 'Admin'}`);
+    emitAttendanceChanged({ company, type: 'attendance_request_approved', date: new Date().toISOString().slice(0, 10) });
 
     res.json({
       success: true,
@@ -498,6 +500,7 @@ async function rejectAttendanceRequest(req, res) {
     );
 
     console.log(`[hrms-portal] Attendance request ${requestId} rejected by ${rejectedBy || 'Admin'}`);
+    emitAttendanceChanged({ company, type: 'attendance_request_rejected', date: new Date().toISOString().slice(0, 10) });
 
     res.json({
       success: true,
@@ -584,6 +587,7 @@ async function updateAttendanceRequest(req, res) {
     }
 
     await col.updateOne({ _id: new ObjectId(requestId) }, { $set: update });
+    emitAttendanceChanged({ company, type: 'attendance_request_updated', date: new Date().toISOString().slice(0, 10) });
 
     res.json({
       success: true,
@@ -629,6 +633,7 @@ async function deleteAttendanceRequest(req, res) {
     }
 
     await col.deleteOne({ _id: new ObjectId(requestId) });
+    emitAttendanceChanged({ company, type: 'attendance_request_deleted', date: new Date().toISOString().slice(0, 10) });
 
     res.json({
       success: true,
@@ -713,6 +718,7 @@ async function createAttendanceRequest(req, res) {
     Object.keys(doc).forEach((k) => doc[k] === undefined && delete doc[k]);
 
     const result = await col.insertOne(doc);
+    emitAttendanceChanged({ company, type: 'attendance_request_created', date: normalizedFrom });
 
     res.json({
       success: true,

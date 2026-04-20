@@ -4,19 +4,13 @@ const { loadRootEnv, bootstrapMongo } = require(path.join(root, 'lib/bootstrapMo
 const { createServiceApp, attachErrorHandler } = require(path.join(root, 'lib/createServiceApp'));
 
 loadRootEnv(root);
-if (process.env.QUERY_TRACKER_SERVICE_PORT) {
-  process.env.BACKEND_PORT = String(parseInt(process.env.QUERY_TRACKER_SERVICE_PORT, 10));
-}
 const { networkConfig, getBackendUrl } = require(path.join(root, 'config/network.config'));
 const { getMongoUri } = require(path.join(root, 'config/app.config'));
 
 const queryTrackerRoutes = require(path.join(root, 'portals/query-tracker/app'));
 
 const app = createServiceApp();
-const port = parseInt(
-  process.env.QUERY_TRACKER_SERVICE_PORT || process.env.QUERY_TRACKER_PORT || process.env.BACKEND_PORT,
-  10
-);
+const port = parseInt(process.env.BACKEND_PORT, 10);
 
 app.get('/api/health', async (req, res) => {
   let mongoStatus = false;
