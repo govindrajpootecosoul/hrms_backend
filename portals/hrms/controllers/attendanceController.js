@@ -280,7 +280,15 @@ async function listAttendance(req, res) {
         let status = 'absent';
         let isLate = false;
         if (timeIn) {
-          status = 'present';
+          const isWFH =
+            record.status === 'wfh' ||
+            record.status === 'WFH' ||
+            record.location === 'remote' ||
+            record.location === 'WFH' ||
+            record.location === 'wfh' ||
+            record.workMode === 'WFH' ||
+            record.workMode === 'wfh';
+          status = isWFH ? 'wfh' : 'present';
           isLate = isLateByPunchIn(checkInTime);
         }
 
@@ -337,7 +345,8 @@ async function listAttendance(req, res) {
         const chosenCheckInTime = timeHmToDate(date, chosenTimeIn);
         mergedByEmpCode.set(empCode, {
           ...existing,
-          status: 'present',
+          status:
+            existing.status === 'wfh' || existing.status === 'work-from-home' ? existing.status : 'present',
           timeIn: chosenTimeIn,
           timeOut: chosenTimeOut,
           isLate: chosenCheckInTime ? isLateByPunchIn(chosenCheckInTime) : false,
@@ -363,7 +372,7 @@ async function listAttendance(req, res) {
     const normalizeDept = (v) => String(v || '').trim().toLowerCase();
     const requestedDept = normalizeDept(department);
 
-    const attendanceRecords = Array.from(mergedByEmpCode.values())
+    let attendanceRecords = Array.from(mergedByEmpCode.values())
       .filter((r) => {
         if (!requestedDept || requestedDept === 'all') return true;
         return normalizeDept(r.department || 'General') === requestedDept;
@@ -375,6 +384,171 @@ async function listAttendance(req, res) {
       if (b.timeIn) return 1;
       return 0;
     });
+
+    // Match attendance/stats: approved leave + WFH requests override "present" (same day scope).
+    try {
+      const requestsCol = db.collection('attendance_requests');
+      const isEmployeeActive = (e) => e?.isActive !== false && e?.active !== false;
+      const scopedEmployees =
+        requestedDept && requestedDept !== 'all'
+          ? allEmployees.filter((e) => normalizeDept(e.department || 'General') === requestedDept)
+          : allEmployees;
+      const employeesList = scopedEmployees.filter(isEmployeeActive);
+
+      const employeeIdMap = new Map();
+      const scopedCanonicalIds = new Set();
+      const empCodeToCanonicalId = new Map();
+
+      employeesList.forEach((emp) => {
+        const canonicalId = emp.employeeId || emp.email?.split('@')[0] || '';
+        if (!canonicalId) return;
+        scopedCanonicalIds.add(canonicalId);
+        employeeIdMap.set(canonicalId, canonicalId);
+        if (emp.email) {
+          const emailPrefix = emp.email.split('@')[0];
+          if (emailPrefix !== canonicalId) employeeIdMap.set(emailPrefix, canonicalId);
+          employeeIdMap.set(emp.email, canonicalId);
+        }
+        if (emp.employeeId && emp.employeeId !== canonicalId) {
+          employeeIdMap.set(emp.employeeId, canonicalId);
+        }
+        const ec = normalizeEmpCode(emp.emp_code);
+        if (ec) empCodeToCanonicalId.set(ec, canonicalId);
+      });
+
+      const todayDateStr = date;
+      const onLeaveEmployees = new Set();
+      const approvedLeaves = await requestsCol
+        .find({
+          type: 'time-off',
+          status: 'approved',
+          ...(companyName ? { company: companyName } : {}),
+        })
+        .toArray();
+
+      approvedLeaves.forEach((leave) => {
+        const parts = splitDateRangeParts(leave.dateRange);
+        if (!parts) return;
+        try {
+          const fromDate = new Date(parts[0].trim());
+          const toDate = new Date(parts[1].trim());
+          const todayDate = new Date(todayDateStr);
+          fromDate.setHours(0, 0, 0, 0);
+          toDate.setHours(0, 0, 0, 0);
+          todayDate.setHours(0, 0, 0, 0);
+          if (todayDate < fromDate || todayDate > toDate) return;
+
+          const leaveEmpId = leave.employeeId;
+          let normalizedLeaveId = employeeIdMap.get(leaveEmpId);
+          if (!normalizedLeaveId) {
+            const matchingEmp = employeesList.find((emp) => {
+              const empId = emp.employeeId || emp.email?.split('@')[0] || '';
+              const emailPrefix = emp.email?.split('@')[0] || '';
+              return (
+                empId === leaveEmpId ||
+                emailPrefix === leaveEmpId ||
+                emp.email === leaveEmpId ||
+                emp.employeeId === leaveEmpId
+              );
+            });
+            if (matchingEmp) {
+              normalizedLeaveId = matchingEmp.employeeId || matchingEmp.email?.split('@')[0] || leaveEmpId;
+              employeeIdMap.set(leaveEmpId, normalizedLeaveId);
+            } else {
+              normalizedLeaveId = leaveEmpId;
+            }
+          }
+          if (!scopedCanonicalIds.has(normalizedLeaveId)) return;
+          onLeaveEmployees.add(normalizedLeaveId);
+        } catch (e) {
+          console.error('[attendance] Error parsing leave date range:', leave.dateRange, e);
+        }
+      });
+
+      const wfhFromRequests = new Set();
+      const wfhRequests = await requestsCol
+        .find({
+          type: { $in: ['wfh', 'WFH', 'work-from-home', 'work from home'] },
+          status: 'approved',
+          ...(companyName ? { company: companyName } : {}),
+        })
+        .toArray();
+
+      wfhRequests.forEach((wfhReq) => {
+        const wfhParts = splitDateRangeParts(wfhReq.dateRange);
+        if (!wfhParts) return;
+        try {
+          const fromDate = new Date(wfhParts[0].trim());
+          const toDate = new Date(wfhParts[1].trim());
+          const todayDate = new Date(todayDateStr);
+          fromDate.setHours(0, 0, 0, 0);
+          toDate.setHours(0, 0, 0, 0);
+          todayDate.setHours(0, 0, 0, 0);
+          if (todayDate < fromDate || todayDate > toDate) return;
+
+          const reqEmpId = wfhReq.employeeId;
+          let normalizedId = employeeIdMap.get(reqEmpId);
+          if (!normalizedId) {
+            const matchingEmp = employeesList.find((emp) => {
+              const empId = emp.employeeId || emp.email?.split('@')[0] || '';
+              return empId === reqEmpId || emp.email === reqEmpId || emp.employeeId === reqEmpId;
+            });
+            if (matchingEmp) {
+              normalizedId = matchingEmp.employeeId || matchingEmp.email?.split('@')[0] || reqEmpId;
+              employeeIdMap.set(reqEmpId, normalizedId);
+            } else {
+              normalizedId = reqEmpId;
+            }
+          }
+          if (!scopedCanonicalIds.has(normalizedId)) return;
+          wfhFromRequests.add(normalizedId);
+        } catch (e) {
+          console.error('[attendance] Error parsing WFH request date range:', wfhReq.dateRange, e);
+        }
+      });
+
+      const resolveCanonicalForRecord = (r) => {
+        const code = normalizeEmpCode(r.biometricId);
+        if (code && empCodeToCanonicalId.has(code)) return empCodeToCanonicalId.get(code);
+        let normalizedId = employeeIdMap.get(r.biometricId);
+        if (normalizedId) return normalizedId;
+        const matchingEmp = employeesList.find((emp) => {
+          const empId = emp.employeeId || emp.email?.split('@')[0] || '';
+          const emailPrefix = emp.email?.split('@')[0] || '';
+          return (
+            empId === r.biometricId ||
+            emailPrefix === r.biometricId ||
+            emp.email === r.biometricId ||
+            emp.employeeId === r.biometricId
+          );
+        });
+        if (matchingEmp) {
+          normalizedId = matchingEmp.employeeId || matchingEmp.email?.split('@')[0] || r.biometricId;
+          employeeIdMap.set(r.biometricId, normalizedId);
+          return normalizedId;
+        }
+        return r.biometricId;
+      };
+
+      // Align with attendance/stats scope: only ACTIVE employees are considered in counts/lists.
+      attendanceRecords = attendanceRecords.filter((r) => {
+        const cid = resolveCanonicalForRecord(r);
+        return scopedCanonicalIds.has(cid);
+      });
+
+      for (let i = 0; i < attendanceRecords.length; i++) {
+        const r = attendanceRecords[i];
+        if (r.status !== 'present') continue;
+        const cid = resolveCanonicalForRecord(r);
+        if (onLeaveEmployees.has(cid)) {
+          attendanceRecords[i] = { ...r, status: 'on-leave' };
+        } else if (wfhFromRequests.has(cid)) {
+          attendanceRecords[i] = { ...r, status: 'wfh' };
+        }
+      }
+    } catch (e) {
+      console.warn('[attendance] Leave/WFH alignment skipped:', e.message);
+    }
 
     res.json({
       success: true,
