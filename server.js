@@ -11,7 +11,7 @@ const { getCorsOptions } = require('./config/cors.config');
 const { subscribeAttendanceEvents } = require('./lib/attendanceEvents');
 
 // Portals (see /portals/<name>/app.js — shared config/ and this server.js at repo root)
-const { authRoutes, adminUsersRoutes } = require('./portals/admin-portal/app');
+const { authRoutes, adminUsersRoutes, adminWarehouseUsersRoutes } = require('./portals/admin-portal/app');
 const hrmsAdminRoutes = require('./portals/hrms-admin/app');
 const hrmsRoutes = require('./portals/hrms/app');
 const assetTrackerRoutes = require('./portals/assets/app');
@@ -55,6 +55,7 @@ app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 // Admin portal (auth + admin users)
 app.use('/api/auth', authRoutes);
 app.use('/api/admin-users', adminUsersRoutes);
+app.use('/api/admin-warehouse-users', adminWarehouseUsersRoutes);
 
 // HRMS: admin surface first, then main HRMS API
 const mountHrms = () => {

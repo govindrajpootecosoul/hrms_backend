@@ -154,6 +154,182 @@ async function getMachineAttendanceForDay(dateStr) {
   return all;
 }
 
+function parseDateRangeFromQuery(req) {
+  const startDate = firstQueryValue(req.query.startDate, null);
+  const endDate = firstQueryValue(req.query.endDate, null);
+  if (!startDate || !endDate) return null;
+  const start = parseYyyyMmDd(startDate);
+  const end = parseYyyyMmDd(endDate);
+  if (!start || !end) return null;
+  // normalize to day bounds in UTC
+  start.setUTCHours(0, 0, 0, 0);
+  end.setUTCHours(23, 59, 59, 999);
+  if (start > end) return null;
+  return { startDate, endDate, start, end };
+}
+
+async function getMachineAttendanceForRange(range) {
+  if (!range?.start || !range?.end) return [];
+  const dbNamesToTry = Array.from(
+    new Set([LOGIN_DB_NAME, 'main_db'].filter((n) => n && String(n).trim() !== ''))
+  );
+  const collectionNamesToTry = ['machine_attendance_reports', 'machine _attendance_reports'];
+
+  const all = [];
+  for (const dbName of dbNamesToTry) {
+    try {
+      const db = await getDb(dbName);
+      const existingCols = new Set((await db.listCollections().toArray()).map((c) => c.name));
+      for (const colName of collectionNamesToTry) {
+        if (!existingCols.has(colName)) continue;
+        const col = db.collection(colName);
+        const docs = await col
+          .find({
+            $or: [
+              { date: { $gte: range.start, $lte: range.end } },
+              // Support string dates like "2026-04-01T00:00:00.000Z" by bounding lexicographically
+              { date: { $gte: range.startDate, $lte: `${range.endDate}T99:99:99.999Z` } },
+            ],
+          })
+          .toArray();
+        all.push(...docs);
+      }
+    } catch (e) {
+      console.warn(`[machine_attendance_reports] Skipping db '${dbName}':`, e.message);
+    }
+  }
+  return all;
+}
+
+function csvEscape(v) {
+  if (v == null) return '';
+  const s = String(v);
+  if (/[",\r\n]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
+  return s;
+}
+
+async function exportMachineAttendanceReports(req, res) {
+  try {
+    const companyName = requireCompany(req, res);
+    if (!companyName) return;
+    await connectMongo();
+
+    const range = parseDateRangeFromQuery(req);
+    if (!range) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid date range. Provide startDate and endDate as YYYY-MM-DD.',
+      });
+    }
+
+    const employeeCode = firstQueryValue(req.query.employeeCode, null);
+    const empCodeFilter = normalizeEmpCode(employeeCode);
+
+    // Scope to this company's known emp_codes so we don't leak other companies' machine data.
+    const { getUsersCollection } = require('../../../config/mongo');
+    const usersCol = await getUsersCollection(null, companyName);
+    const companyEmployees = await usersCol.find({ company: companyName }).toArray();
+    const empCodeToEmployee = new Map();
+    for (const emp of companyEmployees) {
+      const empCode = normalizeEmpCode(emp.emp_code);
+      if (!empCode) continue;
+      empCodeToEmployee.set(empCode, {
+        employeeCode: empCode,
+        employeeName: emp.name || emp.firstName || '',
+        department: emp.department || '',
+        employeeId: emp.employeeId || emp.email?.split('@')[0] || '',
+        email: emp.email || '',
+      });
+    }
+
+    let docs = await getMachineAttendanceForRange(range);
+    docs = docs.filter((d) => {
+      const code = normalizeEmpCode(d?.emp_code);
+      if (!code) return false;
+      if (!empCodeToEmployee.has(code)) return false;
+      if (empCodeFilter && code !== empCodeFilter) return false;
+      return true;
+    });
+
+    // Normalize + sort
+    const rows = docs
+      .map((d) => {
+        const code = normalizeEmpCode(d.emp_code);
+        const meta = empCodeToEmployee.get(code) || {};
+        const dateRaw = d.date;
+        const dateStr = typeof dateRaw === 'string' ? String(dateRaw) : new Date(dateRaw).toISOString();
+        const yyyyMmDd = dateStr.slice(0, 10);
+        const day = (() => {
+          const dt = new Date(dateStr);
+          if (!isValidDate(dt)) return '';
+          return dt.toLocaleDateString('en-US', { weekday: 'short', timeZone: 'UTC' });
+        })();
+        const shift = d.shift || d.shift_code || d.shiftCode || '';
+        const hoursWorked = d.hours_worked ?? d.hoursWorked ?? '';
+        return {
+          name: meta.employeeName || d.name || '',
+          emp_code: code || '',
+          date: dateStr,
+          day,
+          shift,
+          punch_in: d.punch_in || '',
+          punch_out: d.punch_out || '',
+          hours_worked: hoursWorked,
+          status: d.status || '',
+          rawDate: yyyyMmDd,
+        };
+      })
+      .sort((a, b) => {
+        if (a.rawDate !== b.rawDate) return a.rawDate < b.rawDate ? -1 : 1;
+        if (a.emp_code !== b.emp_code) return a.emp_code < b.emp_code ? -1 : 1;
+        return 0;
+      });
+
+    const header = [
+      'name',
+      'emp_code',
+      'date',
+      'day',
+      'shift',
+      'punch_in',
+      'punch_out',
+      'hours_worked',
+      'status',
+    ];
+
+    const csvLines = [header.join(',')];
+    for (const r of rows) {
+      csvLines.push(
+        [
+          csvEscape(r.name),
+          csvEscape(r.emp_code),
+          csvEscape(r.date),
+          csvEscape(r.day),
+          csvEscape(r.shift),
+          csvEscape(r.punch_in),
+          csvEscape(r.punch_out),
+          csvEscape(r.hours_worked),
+          csvEscape(r.status),
+        ].join(',')
+      );
+    }
+
+    const filename = `biometric_attendance_${companyName.replace(/\s+/g, '_')}_${range.startDate}_to_${range.endDate}${
+      empCodeFilter ? `_${empCodeFilter}` : ''
+    }.csv`;
+
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.status(200).send(`${csvLines.join('\r\n')}\r\n`);
+  } catch (error) {
+    console.error('HRMS machine attendance export error:', error);
+    res.status(500).json({
+      success: false,
+      error: process.env.NODE_ENV === 'development' ? error.message || 'Internal server error' : 'Internal server error',
+    });
+  }
+}
+
 async function listAttendance(req, res) {
   try {
     const companyName = requireCompany(req, res);
@@ -1568,4 +1744,5 @@ module.exports = {
   attendanceStats,
   attendanceStatsByDepartment,
   attendanceStatsTrends,
+  exportMachineAttendanceReports,
 };

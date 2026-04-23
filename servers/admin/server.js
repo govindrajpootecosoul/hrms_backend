@@ -10,7 +10,7 @@ if (process.env.ADMIN_SERVICE_PORT) {
 const { networkConfig, getBackendUrl } = require(path.join(root, 'config/network.config'));
 const { getMongoUri } = require(path.join(root, 'config/app.config'));
 
-const { authRoutes, adminUsersRoutes } = require(path.join(root, 'portals/admin-portal/app'));
+const { authRoutes, adminUsersRoutes, adminWarehouseUsersRoutes } = require(path.join(root, 'portals/admin-portal/app'));
 
 const app = createServiceApp();
 const port = parseInt(process.env.ADMIN_SERVICE_PORT || process.env.BACKEND_PORT, 10);
@@ -34,6 +34,7 @@ app.get('/api/health', async (req, res) => {
 
 app.use('/api/auth', authRoutes);
 app.use('/api/admin-users', adminUsersRoutes);
+app.use('/api/admin-warehouse-users', adminWarehouseUsersRoutes);
 attachErrorHandler(app);
 
 (async () => {

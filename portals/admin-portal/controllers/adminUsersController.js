@@ -2,7 +2,27 @@ const express = require('express');
 const router = express.Router();
 const bcrypt = require('bcryptjs');
 const { ObjectId } = require('mongodb');
-const { getUsersCollection, LOGIN_DB_NAME } = require('../../../config/mongo');
+const { getUsersCollection, getWarehouseUsersCollection, getDb, LOGIN_DB_NAME } = require('../../../config/mongo');
+
+const DEPARTMENT_MANAGERS_COLLECTION = 'department_managers';
+const UI_SETTINGS_COLLECTION = 'ui_settings';
+
+async function getDepartmentManagersCollection() {
+  const db = await getDb(LOGIN_DB_NAME);
+  return db.collection(DEPARTMENT_MANAGERS_COLLECTION);
+}
+
+async function getUiSettingsCollection() {
+  const db = await getDb(LOGIN_DB_NAME);
+  return db.collection(UI_SETTINGS_COLLECTION);
+}
+
+async function getUsersCollectionForRequest(req) {
+  if (req?.usersCollectionType === 'warehouse') {
+    return getWarehouseUsersCollection();
+  }
+  return getUsersCollection();
+}
 
 /**
  * Check if a user is a dummy/test user
@@ -82,7 +102,7 @@ async function listUsers(req, res) {
       });
     }
     
-    const usersCol = await getUsersCollection();
+    const usersCol = await getUsersCollectionForRequest(req);
     const query = { company: resolvedCompany };
     const allUsers = await usersCol.find(query).toArray();
     
@@ -197,7 +217,7 @@ async function listDepartments(req, res) {
     }
     
     // Get the appropriate collection based on company
-    const usersCol = await getUsersCollection(null, company);
+    const usersCol = await getUsersCollectionForRequest(req);
     const collectionName = company.toLowerCase().includes('thrive') ? 'Thrive_Employees' : 'Ecosoul_Employees';
     
     console.log(`[admin-users/departments] Fetching departments from ${collectionName} collection for company: ${company}`);
@@ -271,6 +291,182 @@ async function listDepartments(req, res) {
   }
 }
 
+// @route   GET /api/admin-users/departments/managers
+// @desc    Get department -> manager mapping for a company
+// @access  Private/Admin
+// @query   company - Required
+async function listDepartmentManagers(req, res) {
+  try {
+    const { company } = req.query;
+    if (!company) {
+      return res.status(400).json({
+        success: false,
+        error: 'Company is required.'
+      });
+    }
+
+    const col = await getDepartmentManagersCollection();
+    const docs = await col
+      .find({ company: String(company).trim() })
+      .project({ _id: 0 })
+      .toArray();
+
+    const managersByDepartment = {};
+    for (const d of docs) {
+      if (!d?.department) continue;
+      const normalizedIds = Array.isArray(d.managerUserIds)
+        ? d.managerUserIds.filter(Boolean).map((x) => String(x))
+        : d.managerUserId
+          ? [String(d.managerUserId)]
+          : [];
+
+      const normalizedManagers = Array.isArray(d.managers)
+        ? d.managers
+            .filter((m) => m && (m.userId || m.managerUserId))
+            .map((m) => ({
+              userId: String(m.userId || m.managerUserId),
+              name: m.name || m.managerName || '',
+              email: m.email || m.managerEmail || '',
+            }))
+        : d.managerUserId
+          ? [{
+              userId: String(d.managerUserId),
+              name: d.managerName || '',
+              email: d.managerEmail || '',
+            }]
+          : [];
+
+      managersByDepartment[d.department] = {
+        department: d.department,
+        managerUserIds: normalizedIds,
+        managers: normalizedManagers,
+        updatedAt: d.updatedAt || null,
+      };
+    }
+
+    return res.json({
+      success: true,
+      company: String(company).trim(),
+      managersByDepartment,
+      count: Object.keys(managersByDepartment).length,
+    });
+  } catch (error) {
+    console.error('[Admin Dept Managers GET Error]', error);
+    return res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to fetch department managers'
+    });
+  }
+}
+
+// @route   PUT /api/admin-users/departments/:department/manager
+// @desc    Set or clear manager for a department
+// @access  Private/Admin
+// @query   company - Required
+// @body    managerUserIds - Optional array (empty clears). Back-compat: managerUserId string.
+async function setDepartmentManager(req, res) {
+  try {
+    const { company } = req.query;
+    const { department } = req.params;
+    const { managerUserIds, managerUserId } = req.body || {};
+
+    const normalizedCompany = String(company || '').trim();
+    const normalizedDepartment = String(department || '').trim();
+
+    if (!normalizedCompany) {
+      return res.status(400).json({ success: false, error: 'Company is required.' });
+    }
+    if (!normalizedDepartment) {
+      return res.status(400).json({ success: false, error: 'Department is required.' });
+    }
+
+    const col = await getDepartmentManagersCollection();
+
+    const ids = Array.isArray(managerUserIds)
+      ? managerUserIds.filter(Boolean).map((x) => String(x))
+      : managerUserId
+        ? [String(managerUserId)]
+        : [];
+
+    // Clear mapping
+    if (ids.length === 0) {
+      await col.deleteOne({ company: normalizedCompany, department: normalizedDepartment });
+      return res.json({
+        success: true,
+        company: normalizedCompany,
+        department: normalizedDepartment,
+        managers: [],
+        message: 'Department managers cleared.'
+      });
+    }
+
+    const usersCol = await getUsersCollectionForRequest(req);
+    const uniqueIds = Array.from(new Set(ids));
+
+    // Validate all ids and fetch users
+    for (const id of uniqueIds) {
+      if (!ObjectId.isValid(id)) {
+        return res.status(400).json({ success: false, error: `Invalid manager user ID: ${id}` });
+      }
+    }
+
+    const users = await usersCol
+      .find({ _id: { $in: uniqueIds.map((id) => new ObjectId(id)) } })
+      .toArray();
+
+    if (users.length !== uniqueIds.length) {
+      return res.status(404).json({
+        success: false,
+        error: 'One or more manager users were not found.'
+      });
+    }
+
+    // Enforce: manager must belong to the same department
+    const mismatched = users.filter((u) => String(u?.department || '').trim() !== normalizedDepartment);
+    if (mismatched.length > 0) {
+      return res.status(400).json({
+        success: false,
+        error: `Managers must belong to department "${normalizedDepartment}".`
+      });
+    }
+
+    const now = new Date();
+    const doc = {
+      company: normalizedCompany,
+      department: normalizedDepartment,
+      managerUserIds: uniqueIds,
+      managers: users.map((u) => ({
+        userId: u._id.toString(),
+        name: u.name || '',
+        email: u.email || '',
+      })),
+      updatedAt: now,
+    };
+
+    await col.updateOne(
+      { company: normalizedCompany, department: normalizedDepartment },
+      { $set: doc, $setOnInsert: { createdAt: now } },
+      { upsert: true }
+    );
+
+    return res.json({
+      success: true,
+      company: normalizedCompany,
+      department: normalizedDepartment,
+      managers: doc.managers,
+      managerUserIds: doc.managerUserIds,
+      updatedAt: doc.updatedAt,
+      message: 'Department managers updated.'
+    });
+  } catch (error) {
+    console.error('[Admin Dept Managers PUT Error]', error);
+    return res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to set department manager'
+    });
+  }
+}
+
 // @route   GET /api/admin-users/:id
 // @desc    Get single user by ID
 // @access  Private/Admin
@@ -286,7 +482,7 @@ async function getUserById(req, res) {
       });
     }
 
-    const usersCol = await getUsersCollection();
+    const usersCol = await getUsersCollectionForRequest(req);
     const user = await usersCol.findOne({ _id: new ObjectId(id) });
 
     if (!user) {
@@ -368,7 +564,7 @@ async function createUser(req, res) {
     }
 
     // Get the appropriate collection based on company
-    const usersCol = await getUsersCollection(null, company);
+    const usersCol = await getUsersCollectionForRequest(req);
 
     // Check if user already exists (only if email is provided)
     if (email && email.trim() !== '') {
@@ -539,7 +735,7 @@ async function updateUser(req, res) {
     }
 
     // Get the appropriate collection based on company
-    const usersCol = await getUsersCollection(null, company);
+    const usersCol = await getUsersCollectionForRequest(req);
 
     // Check if user exists
     const existingUser = await usersCol.findOne({ _id: new ObjectId(id) });
@@ -708,7 +904,7 @@ async function deleteUser(req, res) {
     }
 
     // Get the appropriate collection based on company
-    const usersCol = await getUsersCollection(null, company);
+    const usersCol = await getUsersCollectionForRequest(req);
 
     // Check if user exists
     const existingUser = await usersCol.findOne({ _id: new ObjectId(id) });
@@ -753,7 +949,7 @@ async function toggleActive(req, res) {
     }
 
     // Get the appropriate collection based on company
-    const usersCol = await getUsersCollection(null, company);
+    const usersCol = await getUsersCollectionForRequest(req);
 
     // Check if user exists
     const existingUser = await usersCol.findOne({ _id: new ObjectId(id) });
@@ -801,7 +997,7 @@ async function toggleActive(req, res) {
 
 async function debugInfo(req, res) {
   try {
-    const usersCol = await getUsersCollection();
+    const usersCol = await getUsersCollectionForRequest(req);
     
     // Get total count
     const totalCount = await usersCol.countDocuments({});
@@ -869,7 +1065,7 @@ async function updatePortals(req, res) {
     }
 
     // Get the appropriate collection based on company
-    const usersCol = await getUsersCollection(null, company);
+    const usersCol = await getUsersCollectionForRequest(req);
 
     // Check if user exists
     const existingUser = await usersCol.findOne({ _id: new ObjectId(id) });
@@ -916,9 +1112,101 @@ async function updatePortals(req, res) {
   }
 }
 
+// @route   GET /api/admin-users/ui/employees-columns
+// @desc    Get global Employees table columns config for a company
+// @access  Public (read-only)
+// @query   company - Required
+// @query   rosterTab - Optional: current|ex (default current)
+async function getEmployeesColumnsConfig(req, res) {
+  try {
+    const { company, rosterTab } = req.query;
+    const normalizedCompany = String(company || '').trim();
+    if (!normalizedCompany) {
+      return res.status(400).json({ success: false, error: 'Company is required.' });
+    }
+    const tab = String(rosterTab || 'current').trim();
+    const col = await getUiSettingsCollection();
+    const doc = await col.findOne({
+      company: normalizedCompany,
+      key: 'employees_columns',
+      rosterTab: tab,
+    });
+    return res.json({
+      success: true,
+      company: normalizedCompany,
+      rosterTab: tab,
+      columns: doc?.columns || null,
+      updatedAt: doc?.updatedAt || null,
+    });
+  } catch (error) {
+    console.error('[Employees Columns GET Error]', error);
+    return res.status(500).json({ success: false, error: error.message || 'Failed to fetch config' });
+  }
+}
+
+// @route   PUT /api/admin-users/ui/employees-columns
+// @desc    Set global Employees table columns config for a company
+// @access  Superadmin only (JWT required)
+// @query   company - Required
+// @body    { columns: Array<{id,label,visible,required,lockPosition}> , rosterTab?: 'current'|'ex' }
+async function setEmployeesColumnsConfig(req, res) {
+  try {
+    const { company } = req.query;
+    const { columns, rosterTab } = req.body || {};
+    const normalizedCompany = String(company || '').trim();
+    if (!normalizedCompany) {
+      return res.status(400).json({ success: false, error: 'Company is required.' });
+    }
+    const tab = String(rosterTab || 'current').trim();
+    if (!Array.isArray(columns) || columns.length === 0) {
+      return res.status(400).json({ success: false, error: 'columns must be a non-empty array.' });
+    }
+
+    // Basic validation: ids must exist
+    for (const c of columns) {
+      if (!c || !c.id) {
+        return res.status(400).json({ success: false, error: 'Each column must have an id.' });
+      }
+    }
+
+    const now = new Date();
+    const updatedBy = req.auth?.email || req.auth?.userId || null;
+    const col = await getUiSettingsCollection();
+    await col.updateOne(
+      { company: normalizedCompany, key: 'employees_columns', rosterTab: tab },
+      {
+        $set: {
+          company: normalizedCompany,
+          key: 'employees_columns',
+          rosterTab: tab,
+          columns,
+          updatedAt: now,
+          updatedBy,
+        },
+        $setOnInsert: { createdAt: now },
+      },
+      { upsert: true }
+    );
+
+    return res.json({
+      success: true,
+      company: normalizedCompany,
+      rosterTab: tab,
+      updatedAt: now,
+    });
+  } catch (error) {
+    console.error('[Employees Columns PUT Error]', error);
+    return res.status(500).json({ success: false, error: error.message || 'Failed to save config' });
+  }
+}
+
 module.exports = {
   listUsers,
   listDepartments,
+  listDepartmentManagers,
+  setDepartmentManager,
+  getEmployeesColumnsConfig,
+  setEmployeesColumnsConfig,
   getUserById,
   createUser,
   updateUser,

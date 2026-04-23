@@ -1,7 +1,7 @@
 /**
  * Leave listing, leave overview stats, and attendance-requests (HR approval workflow).
  */
-const { connectMongo } = require('../../../config/mongo');
+const { connectMongo, getDb, getUsersCollection, LOGIN_DB_NAME } = require('../../../config/mongo');
 const {
   getCompanyFromRequest,
   normalizeCompany,
@@ -11,6 +11,160 @@ const {
   getEmployeeDbForHrms,
 } = require('../utils/hrmsContext');
 const { emitAttendanceChanged } = require('../../../lib/attendanceEvents');
+
+function normalizeEmpCode(value) {
+  if (value == null || value === '') return null;
+  const s = String(value).trim();
+  return s ? s : null;
+}
+
+function parseTimeWindowHm(timeWindow) {
+  if (!timeWindow) return null;
+  const m = String(timeWindow).trim().match(/(\d{1,2}:\d{2})\s*-\s*(\d{1,2}:\d{2})/);
+  if (!m) return null;
+  const pad = (hm) => {
+    const [hRaw, mRaw] = String(hm).split(':');
+    const h = String(Number(hRaw)).padStart(2, '0');
+    const mm = String(Number(mRaw)).padStart(2, '0');
+    return `${h}:${mm}`;
+  };
+  return { start: pad(m[1]), end: pad(m[2]) };
+}
+
+async function upsertMachineAttendanceRegularization({ company, employeeId, dateYmd, timeWindow, approvedBy }) {
+  const empId = String(employeeId || '').trim();
+  if (!company || !empId || !dateYmd) return { applied: false, reason: 'missing company/employeeId/date' };
+
+  const times = parseTimeWindowHm(timeWindow);
+  if (!times) return { applied: false, reason: 'invalid timeWindow' };
+
+  // employee_details lives in login DB but is filtered by company
+  const usersCol = await getUsersCollection(null, company);
+  const escapeRe = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const emp = await usersCol.findOne(
+    {
+      company,
+      $or: [
+        { employeeId: empId },
+        { employeeId: new RegExp(`^${escapeRe(empId)}$`, 'i') },
+        { email: new RegExp(`^${escapeRe(empId)}(@|$)`, 'i') },
+      ],
+    },
+    { projection: { emp_code: 1, employeeId: 1, email: 1, name: 1 } }
+  );
+
+  const empCode = normalizeEmpCode(emp?.emp_code);
+  if (!empCode) return { applied: false, reason: 'emp_code not found for employee' };
+
+  const empCodeStr = String(empCode).trim();
+  const empCodeNum = Number(empCodeStr);
+  const empCodeNoLeadingZeros = empCodeStr.replace(/^0+/, '') || '0';
+  const empCodeCandidates = Array.from(
+    new Set(
+      [empCodeStr, empCodeNoLeadingZeros, Number.isFinite(empCodeNum) ? empCodeNum : null, Number.isFinite(empCodeNum) ? String(empCodeNum) : null].filter(
+        (v) => v !== null && v !== undefined && String(v).trim() !== ''
+      )
+    )
+  );
+
+  const dbNamesToTry = Array.from(new Set([LOGIN_DB_NAME, 'main_db'].filter((n) => n && String(n).trim() !== '')));
+  const collectionNamesToTry = ['machine_attendance_reports', 'machine _attendance_reports'];
+
+  const dateRegex = new RegExp(`^${String(dateYmd).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`);
+  const dateIsoString = `${dateYmd}T00:00:00.000Z`;
+  const start = new Date(`${dateYmd}T00:00:00.000Z`);
+  const end = new Date(`${dateYmd}T23:59:59.999Z`);
+
+  let applied = false;
+  let target = null;
+
+  for (const dbName of dbNamesToTry) {
+    try {
+      const db0 = await getDb(dbName);
+      const existingCols = new Set((await db0.listCollections().toArray()).map((c) => c.name));
+      for (const colName of collectionNamesToTry) {
+        if (!existingCols.has(colName)) continue;
+        const col = db0.collection(colName);
+        target = { dbName, colName };
+
+        const update = {
+          $set: {
+            punch_in: times.start,
+            punch_out: times.end,
+            status: 'Present',
+            updatedAt: new Date(),
+            updatedBy: approvedBy || 'Admin',
+            source: 'regularization',
+          },
+        };
+
+        // 1) Prefer updating an existing doc (avoid unique-index dup inserts).
+        const broadFilter = {
+          emp_code: { $in: empCodeCandidates },
+          $or: [{ date: { $gte: start, $lte: end } }, { date: dateRegex }, { date: dateYmd }, { date: dateIsoString }],
+        };
+        const upd0 = await col.updateOne(broadFilter, update, { upsert: false });
+        if (upd0.matchedCount > 0) {
+          applied = true;
+          break;
+        }
+
+        // 2) If no match (date stored in an unexpected way), try exact unique-key shapes.
+        const exactFilters = [];
+        for (const code of empCodeCandidates) {
+          exactFilters.push({ emp_code: code, date: start });
+          exactFilters.push({ emp_code: code, date: dateIsoString });
+          exactFilters.push({ emp_code: code, date: dateYmd });
+        }
+        let matched = false;
+        for (const f of exactFilters) {
+          const upd = await col.updateOne(f, update, { upsert: false });
+          if (upd.matchedCount > 0) {
+            matched = true;
+            applied = true;
+            break;
+          }
+        }
+        if (matched) break;
+
+        // 3) Nothing exists — insert a new machine row (upsert), but guard against duplicates.
+        const insertUpdate = {
+          $set: {
+            emp_code: empCodeStr,
+            date: dateIsoString,
+            punch_in: times.start,
+            punch_out: times.end,
+            status: 'Present',
+            updatedAt: new Date(),
+            updatedBy: approvedBy || 'Admin',
+            source: 'regularization',
+          },
+          $setOnInsert: { createdAt: new Date() },
+        };
+        try {
+          await col.updateOne({ emp_code: empCodeStr, date: dateIsoString }, insertUpdate, { upsert: true });
+          applied = true;
+          break;
+        } catch (e) {
+          // If unique index blocks insert, fall back to exact date(Date) update.
+          if (String(e?.message || '').toLowerCase().includes('duplicate key')) {
+            const upd = await col.updateOne({ emp_code: empCodeStr, date: start }, update, { upsert: false });
+            if (upd.matchedCount > 0) {
+              applied = true;
+              break;
+            }
+          }
+          throw e;
+        }
+      }
+    } catch (e) {
+      console.warn('[hrms-portal] machine_attendance_reports update skipped for db', dbName, e.message);
+    }
+    if (applied) break;
+  }
+
+  return { applied, empCode: empCodeStr, target };
+}
 
 async function listLeaves(req, res) {
   try {
@@ -409,25 +563,24 @@ async function approveAttendanceRequest(req, res) {
       });
     }
 
-    // Perform the update
+    // Perform the update (first-wins: only pending can be approved)
     const updateResult = await col.updateOne(
-      updateQuery,
+      { ...(updateQuery || {}), status: 'pending' },
       {
         $set: {
           status: 'approved',
           approvedAt: new Date(),
           approvedBy: approvedBy || 'Admin',
+          approvedByRole: 'hr',
           updatedAt: new Date()
         }
       }
     );
 
     if (updateResult.matchedCount === 0) {
-      console.error(`[hrms-portal] Update failed - no document matched for ID: ${requestId}`);
-      console.error(`[hrms-portal] Update query used:`, JSON.stringify(updateQuery));
-      return res.status(404).json({ 
-        success: false, 
-        error: 'Request not found or could not be updated' 
+      return res.status(409).json({
+        success: false,
+        error: 'This request was already processed by someone else.'
       });
     }
 
@@ -436,6 +589,31 @@ async function approveAttendanceRequest(req, res) {
     }
 
     console.log(`[hrms-portal] ✅ Attendance request ${requestId} approved by ${approvedBy || 'Admin'}`);
+
+    // If this is an attendance regularization request, apply it to machine attendance reports.
+    if (request.type === 'regularization' && request.date && request.timeWindow) {
+      try {
+        const patch = await upsertMachineAttendanceRegularization({
+          company,
+          employeeId: request.employeeId,
+          dateYmd: request.date,
+          timeWindow: request.timeWindow,
+          approvedBy: approvedBy || 'Admin',
+        });
+        if (!patch.applied) {
+          console.warn('[hrms-portal] Regularization approved but machine attendance not updated:', patch.reason);
+        } else {
+          console.log('[hrms-portal] ✅ Machine attendance updated for regularization', {
+            empCode: patch.empCode,
+            date: request.date,
+            target: patch.target,
+          });
+        }
+      } catch (e) {
+        console.error('[hrms-portal] Failed to apply regularization to machine attendance:', e);
+      }
+    }
+
     emitAttendanceChanged({ company, type: 'attendance_request_approved', date: new Date().toISOString().slice(0, 10) });
 
     res.json({
@@ -486,18 +664,26 @@ async function rejectAttendanceRequest(req, res) {
       return res.status(400).json({ success: false, error: 'Request is not pending' });
     }
 
-    await col.updateOne(
-      { _id: new ObjectId(requestId) },
+    const updateResult = await col.updateOne(
+      { _id: new ObjectId(requestId), status: 'pending' },
       {
         $set: {
           status: 'rejected',
           rejectedAt: new Date(),
           rejectedBy: rejectedBy || 'Admin',
+          rejectedByRole: 'hr',
           rejectionReason: rejectionReason || '',
           updatedAt: new Date()
         }
       }
     );
+
+    if (updateResult.matchedCount === 0) {
+      return res.status(409).json({
+        success: false,
+        error: 'This request was already processed by someone else.'
+      });
+    }
 
     console.log(`[hrms-portal] Attendance request ${requestId} rejected by ${rejectedBy || 'Admin'}`);
     emitAttendanceChanged({ company, type: 'attendance_request_rejected', date: new Date().toISOString().slice(0, 10) });

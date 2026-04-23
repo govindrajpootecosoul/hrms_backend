@@ -192,6 +192,16 @@ async function getUsersCollection(email = null, company = null) {
 }
 
 /**
+ * Warehouse employees are stored in a separate collection inside the login DB.
+ * Collection name is controlled by MONGO_WAREHOUSEUSERS_COLLECTION (defaults to `warehouse_employee_details`).
+ */
+async function getWarehouseUsersCollection() {
+  const db = await getDb(LOGIN_DB_NAME);
+  const name = (process.env.MONGO_WAREHOUSEUSERS_COLLECTION || 'warehouse_employee_details').trim();
+  return db.collection(name);
+}
+
+/**
  * Initialize database and collections for a specific portal
  * @param {string} portalName - Portal key from PORTAL_CONFIG (e.g. 'hrms', 'assets')
  * @returns {Promise<void>}
@@ -385,6 +395,7 @@ module.exports = {
   getDb,
   getEmployeePortalDb,
   getUsersCollection,
+  getWarehouseUsersCollection,
   initializePortalDatabaseForDb,
   initializeCompanyPortals,
   ensureCompanyPortalsForTenantRequest,
