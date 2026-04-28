@@ -1134,12 +1134,51 @@ async function attendanceStats(req, res) {
     // Calculate absent count based on ACTIVE employees only.
     const absentCount = Math.max(0, activeEmployees - presentCount - onLeaveCount - onWFHCount);
 
-    // Count late check-ins (check-in after 9:00 AM)
-    const lateCheckIns = todayCheckIns.filter(c => {
-      if (!c.checkInTime) return false;
-      const checkIn = new Date(c.checkInTime);
-      return checkIn.getHours() > 9 || (checkIn.getHours() === 9 && checkIn.getMinutes() > 0);
-    }).length;
+    // Count late check-ins: unique ACTIVE employees, excluding WFH + leave, and using the same late rule everywhere.
+    const isWFHCheckin = (c) =>
+      c?.status === 'wfh' ||
+      c?.status === 'WFH' ||
+      c?.location === 'remote' ||
+      c?.location === 'WFH' ||
+      c?.location === 'wfh' ||
+      c?.workMode === 'WFH' ||
+      c?.workMode === 'wfh';
+
+    const countedLate = new Set(); // canonicalId
+    for (const c of todayCheckIns) {
+      if (!c?.checkInTime || !c?.employeeId) continue;
+
+      // Normalize employeeId to canonical and enforce current scope (active employees only).
+      let normalizedId = employeeIdMap.get(c.employeeId);
+      if (!normalizedId) {
+        const matchingEmp = employeesList.find((emp) => {
+          const empId = emp.employeeId || emp.email?.split('@')[0] || '';
+          const emailPrefix = emp.email?.split('@')[0] || '';
+          return (
+            empId === c.employeeId ||
+            emailPrefix === c.employeeId ||
+            emp.email === c.employeeId ||
+            emp.employeeId === c.employeeId
+          );
+        });
+        if (matchingEmp) {
+          normalizedId = matchingEmp.employeeId || matchingEmp.email?.split('@')[0] || c.employeeId;
+          employeeIdMap.set(c.employeeId, normalizedId);
+        } else {
+          normalizedId = c.employeeId;
+        }
+      }
+
+      if (!scopedCanonicalIds.has(normalizedId)) continue;
+      if (onLeaveEmployees.has(normalizedId)) continue;
+      if (wfhEmployees.has(normalizedId)) continue;
+      if (isWFHCheckin(c)) continue;
+      if (countedLate.has(normalizedId)) continue;
+
+      const t = parseCheckTime(c.checkInTime);
+      if (t && isLateByPunchIn(t)) countedLate.add(normalizedId);
+    }
+    const lateCheckIns = countedLate.size;
 
     // Get pending attendance requests count
     const pendingRequests = await requestsCol.countDocuments({ 
