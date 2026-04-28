@@ -140,13 +140,17 @@ async function listUsers(req, res) {
       
       // Personal details
       phone: user.phone || '',
+      workPhone: user.workPhone || '',
+      homePhone: user.homePhone || '',
+      personalEmail: user.personalEmail || '',
+      fatherName: user.fatherName || '',
       dateOfBirth: user.dateOfBirth || '',
+      actualDob: user.actualDob || '',
       gender: user.gender || '',
-      address: user.address || '',
-      city: user.city || '',
-      state: user.state || '',
-      zipCode: user.zipCode || '',
-      emergencyContact: user.emergencyContact || '',
+      maritalStatus: user.maritalStatus || '',
+      bloodGroup: user.bloodGroup || '',
+      presentAddress: user.presentAddress || '',
+      permanentAddress: user.permanentAddress || '',
       emergencyPhone: user.emergencyPhone || '',
       
       // Work details
@@ -533,9 +537,26 @@ async function createUser(req, res) {
       name, email, password, active, portals, role, employeeId, department, company: companyField, 
       hasCredentialAccess, hasSubscriptionAccess,
       // Personal details
-      phone, dateOfBirth, gender, address, city, state, zipCode, emergencyContact, emergencyPhone,
+      phone,
+      workPhone,
+      homePhone,
+      personalEmail,
+      fatherName,
+      dateOfBirth,
+      actualDob,
+      gender,
+      maritalStatus,
+      bloodGroup,
+      address,
+      presentAddress,
+      permanentAddress,
+      city,
+      state,
+      zipCode,
+      emergencyContact,
+      emergencyPhone,
       // Work details
-      jobTitle, location, reportingManager, joiningDate, card_no, emp_code,
+      jobTitle, location, reportingManager, joiningDate, exitDate, card_no, emp_code,
       // Bank & Insurance
       bankAccount, ifsc, pan, aadhaar, uan, esiNo, pfNo
     } = req.body;
@@ -604,9 +625,18 @@ async function createUser(req, res) {
       
       // Personal details
       phone: phone || '',
+      workPhone: workPhone || '',
+      homePhone: homePhone || '',
+      personalEmail: personalEmail ? String(personalEmail).trim().toLowerCase() : '',
+      fatherName: fatherName || '',
       dateOfBirth: dateOfBirth || '',
+      actualDob: actualDob || '',
       gender: gender || '',
+      maritalStatus: maritalStatus || '',
+      bloodGroup: bloodGroup || '',
       address: address || '',
+      presentAddress: presentAddress || '',
+      permanentAddress: permanentAddress || '',
       city: city || '',
       state: state || '',
       zipCode: zipCode || '',
@@ -618,6 +648,7 @@ async function createUser(req, res) {
       location: location || '',
       reportingManager: reportingManager || '',
       joiningDate: joiningDate || '',
+      exitDate: exitDate || '',
       card_no: card_no || '',
       emp_code: emp_code || '',
       
@@ -675,9 +706,18 @@ async function createUser(req, res) {
         hasSubscriptionAccess: newUser.hasSubscriptionAccess,
         // Include all other fields in response
         phone: newUser.phone,
+        workPhone: newUser.workPhone,
+        homePhone: newUser.homePhone,
+        personalEmail: newUser.personalEmail,
+        fatherName: newUser.fatherName,
         dateOfBirth: newUser.dateOfBirth,
+        actualDob: newUser.actualDob,
         gender: newUser.gender,
+        maritalStatus: newUser.maritalStatus,
+        bloodGroup: newUser.bloodGroup,
         address: newUser.address,
+        presentAddress: newUser.presentAddress,
+        permanentAddress: newUser.permanentAddress,
         city: newUser.city,
         state: newUser.state,
         zipCode: newUser.zipCode,
@@ -687,6 +727,7 @@ async function createUser(req, res) {
         location: newUser.location,
         reportingManager: newUser.reportingManager,
         joiningDate: newUser.joiningDate,
+        exitDate: newUser.exitDate,
         card_no: newUser.card_no,
         emp_code: newUser.emp_code,
         bankAccount: newUser.bankAccount,
@@ -719,7 +760,24 @@ async function updateUser(req, res) {
       name, email, password, active, portals, role, employeeId, department, company: companyField, 
       hasCredentialAccess, hasSubscriptionAccess,
       // Personal details
-      phone, dateOfBirth, gender, address, city, state, zipCode, emergencyContact, emergencyPhone,
+      phone,
+      workPhone,
+      homePhone,
+      personalEmail,
+      fatherName,
+      dateOfBirth,
+      actualDob,
+      gender,
+      maritalStatus,
+      bloodGroup,
+      address,
+      presentAddress,
+      permanentAddress,
+      city,
+      state,
+      zipCode,
+      emergencyContact,
+      emergencyPhone,
       // Work details
       jobTitle, location, reportingManager, joiningDate, exitDate, card_no, emp_code,
       // Bank & Insurance
@@ -820,9 +878,18 @@ async function updateUser(req, res) {
     
     // Personal details - Only update if provided
     if (phone !== undefined) updateData.phone = phone;
+    if (workPhone !== undefined) updateData.workPhone = workPhone;
+    if (homePhone !== undefined) updateData.homePhone = homePhone;
+    if (personalEmail !== undefined) updateData.personalEmail = personalEmail ? String(personalEmail).trim().toLowerCase() : '';
+    if (fatherName !== undefined) updateData.fatherName = fatherName;
     if (dateOfBirth !== undefined) updateData.dateOfBirth = dateOfBirth;
+    if (actualDob !== undefined) updateData.actualDob = actualDob;
     if (gender !== undefined) updateData.gender = gender;
+    if (maritalStatus !== undefined) updateData.maritalStatus = maritalStatus;
+    if (bloodGroup !== undefined) updateData.bloodGroup = bloodGroup;
     if (address !== undefined) updateData.address = address;
+    if (presentAddress !== undefined) updateData.presentAddress = presentAddress;
+    if (permanentAddress !== undefined) updateData.permanentAddress = permanentAddress;
     if (city !== undefined) updateData.city = city;
     if (state !== undefined) updateData.state = state;
     if (zipCode !== undefined) updateData.zipCode = zipCode;
