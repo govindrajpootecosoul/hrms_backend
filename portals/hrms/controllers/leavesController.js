@@ -365,8 +365,23 @@ async function leaveUtilization(req, res) {
         
         // Check if request is in the current year
         if (fromDate.getFullYear() === year || toDate.getFullYear() === year) {
-          const diffTime = Math.abs(toDate - fromDate);
-          const days = Math.ceil(diffTime / (1000 * 60 * 60 * 24)) + 1;
+          // Count only Mon–Fri; do not count Saturday/Sunday as leave days
+          const countWeekdaysInclusive = (from, to) => {
+            let c = 0;
+            const d = new Date(from);
+            d.setHours(0, 0, 0, 0);
+            const end = new Date(to);
+            end.setHours(0, 0, 0, 0);
+            const t = d.getTime();
+            const te = end.getTime();
+            if (t > te) return 0;
+            for (let x = new Date(d); x.getTime() <= te; x.setDate(x.getDate() + 1)) {
+              const wd = x.getDay();
+              if (wd !== 0 && wd !== 6) c += 1;
+            }
+            return c;
+          };
+          const days = countWeekdaysInclusive(fromDate, toDate);
           
           if (!utilizationMap.has(req.employeeId)) {
             utilizationMap.set(req.employeeId, {

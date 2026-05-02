@@ -170,6 +170,9 @@ async function listUsers(req, res) {
       uan: user.uan || '',
       esiNo: user.esiNo || '',
       pfNo: user.pfNo || '',
+      annualCtc: user.annualCtc != null && user.annualCtc !== '' ? Number(user.annualCtc) : null,
+      pfRule: user.pfRule || 'NEW',
+      pfSlabId: user.pfSlabId || '',
       
       createdAt: user.createdAt,
       updatedAt: user.updatedAt
@@ -781,7 +784,11 @@ async function updateUser(req, res) {
       // Work details
       jobTitle, location, reportingManager, joiningDate, exitDate, card_no, emp_code,
       // Bank & Insurance
-      bankAccount, ifsc, pan, aadhaar, uan, esiNo, pfNo
+      bankAccount, ifsc, pan, aadhaar, uan, esiNo, pfNo,
+      // Payroll
+      annualCtc,
+      pfRule,
+      pfSlabId,
     } = req.body;
     const { company } = req.query; // Get company from query parameter
 
@@ -912,6 +919,16 @@ async function updateUser(req, res) {
     if (uan !== undefined) updateData.uan = uan;
     if (esiNo !== undefined) updateData.esiNo = esiNo;
     if (pfNo !== undefined) updateData.pfNo = pfNo;
+
+    if (annualCtc !== undefined) {
+      const n = Number(annualCtc);
+      updateData.annualCtc = Number.isFinite(n) && n >= 0 ? n : null;
+    }
+    if (pfRule !== undefined) {
+      const r = String(pfRule || '').toUpperCase();
+      updateData.pfRule = r === 'OLD' ? 'OLD' : 'NEW';
+    }
+    if (pfSlabId !== undefined) updateData.pfSlabId = pfSlabId === '' || pfSlabId == null ? null : String(pfSlabId);
 
     // Update user
     await usersCol.updateOne(
