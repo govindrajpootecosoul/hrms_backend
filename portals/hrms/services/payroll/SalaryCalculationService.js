@@ -9,13 +9,14 @@ const {
 } = require('../../utils/machineAttendanceQuery');
 const { loadPayrollCompanySettings, pickPfSlabForCtc } = require('./payrollSettingsStore');
 const { loadPayrollAttendanceAdjustment } = require('./payrollAttendanceAdjustmentStore');
+const { decryptAnnualCtcStored } = require('../../../../utils/ctcEncryption');
 
 /**
  * Enterprise payroll calculation engine (India) for the existing Mongo-first HRMS backend.
  * - Attendance bridge → LOP from absences + late/early minutes
- * - PF / ESI statutory
- * - TDS monthly deduction from annual tax liability (Old/New regime)
- * - Dynamic component math: Basic as % of CTC, "Special Allowance" as balancing figure
+ * - PF EE & PF ER on LOP-prorated gross (wage cap); both reduce net pay; ESIC / TDS as before
+ * - TDS monthly deduction: currently disabled (not cut from net)
+ * - Monthly gross = annual CTC ÷ 12; splits: Basic 50% of gross, HRA 20%, Food 10%, Special 20% (rounded; special absorbs remainder)
  *
  * Money is represented in INR rupees as Number for now (existing codebase style).
  * If you need paise-precision later, switch to integer paise everywhere.
@@ -58,10 +59,34 @@ class SalaryCalculationService {
   }
 
   /**
-   * Build monthly component plan from annual CTC.
-   * Supports: Basic as % of CTC, HRA as % of Basic, fixed allowances, and balancing Special.
+   * Build monthly component plan from annual CTC (full month, before LOP factor).
+   * Gross = CTC ÷ 12; Basic = gross ÷ 2; HRA = 20% gross; Food = 10% gross; Special = remainder to match gross.
+   * Optional `rules.structurePreset === 'LEGACY_BALANCE_SPECIAL'` restores older CTC-% + HRA-on-basic behaviour.
    */
   buildMonthlyStructure({ annualCtc, rules }) {
+    if (String(rules?.structurePreset || '').toUpperCase() === 'LEGACY_BALANCE_SPECIAL') {
+      return this.buildMonthlyStructureLegacy({ annualCtc, rules });
+    }
+
+    const g = this.roundMoney(Number(annualCtc || 0) / 12);
+    const basic = this.roundMoney(g / 2);
+    const hra = this.roundMoney(g * 0.2);
+    const food = this.roundMoney(g * 0.1);
+    const special = this.roundMoney(g - basic - hra - food);
+
+    const earnings = [
+      { code: 'BASIC', name: 'Basic', amount: basic, taxable: true },
+      { code: 'HRA', name: 'HRA', amount: hra, taxable: true },
+      { code: 'FOOD', name: 'Food Allowance', amount: food, taxable: true },
+      { code: 'SPECIAL', name: 'Special Allowance', amount: special, taxable: true },
+    ];
+
+    const grossMonthly = this.roundMoney(earnings.reduce((s, e) => s + Number(e.amount || 0), 0));
+    return { ctcMonthly: g, earnings, grossMonthly };
+  }
+
+  /** @deprecated Use default gross-split; kept for `structurePreset: LEGACY_BALANCE_SPECIAL`. */
+  buildMonthlyStructureLegacy({ annualCtc, rules }) {
     const ctcMonthly = annualCtc / 12;
     const basic = (ctcMonthly * (rules.basicPercentOfCtc ?? 50)) / 100;
     const hra = rules.hraPercentOfBasic != null ? (basic * rules.hraPercentOfBasic) / 100 : 0;
@@ -69,7 +94,6 @@ class SalaryCalculationService {
     const fixed = Array.isArray(rules.fixedEarnings) ? rules.fixedEarnings : [];
     const fixedTotal = fixed.reduce((sum, c) => sum + Number(c.amount || 0), 0);
 
-    // Special allowance is balancing figure so that total earnings matches monthly CTC.
     const special = ctcMonthly - (basic + hra + fixedTotal);
 
     const earnings = [
@@ -90,12 +114,10 @@ class SalaryCalculationService {
       },
     ];
 
-    // Guard: if special went negative due to rule choices, keep it at 0 and reduce last fixed earning.
     if (earnings.find((e) => e.code === 'SPECIAL').amount < 0) {
       const sp = earnings.find((e) => e.code === 'SPECIAL');
       const deficit = Math.abs(sp.amount);
       sp.amount = 0;
-      // reduce from last fixed if possible
       for (let i = earnings.length - 2; i >= 0 && deficit > 0; i--) {
         if (earnings[i].code === 'BASIC' || earnings[i].code === 'HRA') continue;
         const reducible = Math.min(deficit, earnings[i].amount);
@@ -150,12 +172,16 @@ class SalaryCalculationService {
     }
 
     let workingDaysInMonth = 0;
+    let weekendDaysInMonth = 0;
     let paidDaysOnWorkingDays = 0;
 
     for (let day = 1; day <= daysInMonth; day++) {
       const d = new Date(Date.UTC(yyyy, mm - 1, day, 12, 0, 0, 0));
       const dow = d.getUTCDay(); // 0 Sun, 6 Sat
-      if (dow === 0 || dow === 6) continue;
+      if (dow === 0 || dow === 6) {
+        weekendDaysInMonth += 1;
+        continue;
+      }
       workingDaysInMonth += 1;
       const dayStr = yyyyMmDdUtc(yyyy, mm, day);
       const r = machineByDate.get(dayStr);
@@ -169,6 +195,7 @@ class SalaryCalculationService {
     return {
       monthYear,
       daysInMonth,
+      weekendDaysInMonth,
       workingDaysInMonth,
       paidDays: paidDaysOnWorkingDays,
       lopDays: Number(lopDays.toFixed(3)),
@@ -178,7 +205,8 @@ class SalaryCalculationService {
   }
 
   computePf({
-    basicMonthly,
+    /** PF wage base (monthly gross after LOP proration). Slab % / fixed apply on this (subject to PF wage ceiling). */
+    pfWageMonthly,
     pfEnabled,
     pfWageCeilingOn,
     pfWageCeilingMonthly,
@@ -196,7 +224,7 @@ class SalaryCalculationService {
     if (!pfEnabled) return { employee: 0, employer: 0, wage: 0 };
     const ceilingOn = pfWageCeilingOn ?? this.opts.pfWageCeilingEnabled;
     const ceiling = Number(pfWageCeilingMonthly ?? this.opts.pfWageCeilingMonthly ?? 15000);
-    const wage = ceilingOn ? Math.min(Number(basicMonthly || 0), ceiling) : Number(basicMonthly || 0);
+    const wage = ceilingOn ? Math.min(Number(pfWageMonthly || 0), ceiling) : Number(pfWageMonthly || 0);
     const er = employeeRate != null ? Number(employeeRate) : this.opts.pfRateEmployee;
     const or = employerRate != null ? Number(employerRate) : this.opts.pfRateEmployer;
 
@@ -215,7 +243,7 @@ class SalaryCalculationService {
     const prorateFixed = pfFixedProrateWithLop !== false;
     const fixedMul = prorateFixed ? f : 1;
 
-    // % PF: `wage` is already from LOP-prorated basic. Fixed ₹: multiply by `fixedMul` only if company enabled pfFixedProrateWithLop.
+    // % PF: `wage` is from LOP-prorated gross. Fixed ₹: multiply by `fixedMul` only if company enabled pfFixedProrateWithLop.
     const employee = useEeFixed ? Number(eeFixedRs) * fixedMul : wage * er;
     const employer = useErFixed ? Number(erFixedRs) * fixedMul : wage * or;
 
@@ -332,7 +360,6 @@ class SalaryCalculationService {
     });
 
     const { earnings } = structure;
-    const basic = earnings.find((e) => e.code === 'BASIC')?.amount || 0;
 
     // LOP: prorate against scheduled working days in month (weekends excluded from denominator)
     const denom = Math.max(1, attendance.workingDaysInMonth || attendance.daysInMonth);
@@ -341,7 +368,7 @@ class SalaryCalculationService {
     const grossMonthly = proratedEarnings.reduce((s, e) => s + Number(e.amount || 0), 0);
 
     const pf = this.computePf({
-      basicMonthly: proratedEarnings.find((e) => e.code === 'BASIC')?.amount || 0,
+      pfWageMonthly: grossMonthly,
       pfEnabled: payrollProfile?.pfEnabled !== false,
       pfWageCeilingOn: payrollProfile?.pfWageCeilingOn !== false,
       pfWageCeilingMonthly: settings.pfWageCeilingMonthly,
@@ -366,12 +393,13 @@ class SalaryCalculationService {
       String(regime).toUpperCase() === 'OLD' ? this.opts.standardDeductionOld : this.opts.standardDeductionNew;
     const taxableAnnual = Math.max(0, grossMonthly * 12 - standardDeduction - pf.employee * 12);
     const annualTax = this.computeAnnualTax({ taxableAnnual, regime });
-    const tds = this.computeTdsMonthly({ annualTax, monthsRemaining: 12 }); // can be improved with FY remaining
+    // TDS not withheld for now (re-enable when payroll tax withholding is finalized).
+    const tds = 0;
 
     const deductions = [
-      ...(pf.employee ? [{ code: 'PF_EMP', name: 'EPF Contribution', amount: pf.employee }] : []),
-      ...(esi.employee ? [{ code: 'ESI_EMP', name: 'ESI (Employee)', amount: esi.employee }] : []),
-      ...(tds ? [{ code: 'TDS', name: 'TDS', amount: tds }] : []),
+      ...(pf.employee ? [{ code: 'PF_EMP', name: 'PF (Employee)', amount: pf.employee }] : []),
+      ...(pf.employer ? [{ code: 'PF_EMPR', name: 'PF (Employer)', amount: pf.employer }] : []),
+      ...(esi.employee ? [{ code: 'ESI_EMP', name: 'ESIC (Employee)', amount: esi.employee }] : []),
     ];
 
     const deductionsTotal = deductions.reduce((s, d) => s + Number(d.amount || 0), 0);
@@ -397,10 +425,7 @@ class SalaryCalculationService {
         : null,
       earnings: proratedEarnings,
       deductions,
-      employerContrib: [
-        ...(pf.employer ? [{ code: 'PF_EMPR', name: 'EPF (Employer)', amount: pf.employer }] : []),
-        ...(esi.employer ? [{ code: 'ESI_EMPR', name: 'ESI (Employer)', amount: esi.employer }] : []),
-      ],
+      employerContrib: [...(esi.employer ? [{ code: 'ESI_EMPR', name: 'ESI (Employer)', amount: esi.employer }] : [])],
       statutory: { pf, esi, tds, annualTax, taxableAnnual, regime },
       totals: {
         gross: this.roundMoney(grossMonthly),
@@ -431,7 +456,11 @@ class SalaryCalculationService {
         },
       }
     );
-    return emp || {};
+    if (!emp) return {};
+    return {
+      ...emp,
+      annualCtc: decryptAnnualCtcStored(emp.annualCtc),
+    };
   }
 }
 

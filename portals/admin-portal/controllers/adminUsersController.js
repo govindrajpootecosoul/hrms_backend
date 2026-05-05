@@ -3,6 +3,10 @@ const router = express.Router();
 const bcrypt = require('bcryptjs');
 const { ObjectId } = require('mongodb');
 const { getUsersCollection, getWarehouseUsersCollection, getDb, LOGIN_DB_NAME } = require('../../../config/mongo');
+const {
+  encryptAnnualCtcForStorage,
+  decryptAnnualCtcStored,
+} = require('../../../utils/ctcEncryption');
 
 const DEPARTMENT_MANAGERS_COLLECTION = 'department_managers';
 const UI_SETTINGS_COLLECTION = 'ui_settings';
@@ -170,7 +174,7 @@ async function listUsers(req, res) {
       uan: user.uan || '',
       esiNo: user.esiNo || '',
       pfNo: user.pfNo || '',
-      annualCtc: user.annualCtc != null && user.annualCtc !== '' ? Number(user.annualCtc) : null,
+      annualCtc: decryptAnnualCtcStored(user.annualCtc),
       pfRule: user.pfRule || 'NEW',
       pfSlabId: user.pfSlabId || '',
       
@@ -921,8 +925,13 @@ async function updateUser(req, res) {
     if (pfNo !== undefined) updateData.pfNo = pfNo;
 
     if (annualCtc !== undefined) {
-      const n = Number(annualCtc);
-      updateData.annualCtc = Number.isFinite(n) && n >= 0 ? n : null;
+      if (annualCtc === null || annualCtc === '') {
+        updateData.annualCtc = null;
+      } else {
+        const n = Number(annualCtc);
+        updateData.annualCtc =
+          Number.isFinite(n) && n >= 0 ? encryptAnnualCtcForStorage(n) : null;
+      }
     }
     if (pfRule !== undefined) {
       const r = String(pfRule || '').toUpperCase();

@@ -11,6 +11,7 @@ const {
   loadPayrollAttendanceAdjustment,
   savePayrollAttendanceAdjustment,
 } = require('../services/payroll/payrollAttendanceAdjustmentStore');
+const { decryptAnnualCtcStored } = require('../../../utils/ctcEncryption');
 
 /**
  * Payroll APIs (mounted at /api/hrms).
@@ -155,8 +156,8 @@ router.get('/payroll/employees-month-overview', async (req, res) => {
         continue;
       }
 
-      const annualCtc = Number(emp.annualCtc);
-      if (!Number.isFinite(annualCtc) || annualCtc <= 0) {
+      const annualCtc = decryptAnnualCtcStored(emp.annualCtc);
+      if (annualCtc == null || !Number.isFinite(annualCtc) || annualCtc <= 0) {
         rows.push({
           mongoId: emp._id?.toString(),
           employeeId,
@@ -191,6 +192,11 @@ router.get('/payroll/employees-month-overview', async (req, res) => {
         });
 
         const pf = result.statutory?.pf || {};
+        const esi = result.statutory?.esi || {};
+        const earn = (code) => {
+          const row = (result.earnings || []).find((e) => e.code === code);
+          return row != null ? Number(row.amount || 0) : 0;
+        };
         rows.push({
           mongoId: emp._id?.toString(),
           employeeId,
@@ -210,9 +216,17 @@ router.get('/payroll/employees-month-overview', async (req, res) => {
           paidDaysAdjustment: result.attendance?.paidDaysAdjustment ?? 0,
           lopDays: result.attendance?.lopDays ?? null,
           workingDaysInMonth: result.attendance?.workingDaysInMonth ?? null,
+          weekendDaysInMonth: result.attendance?.weekendDaysInMonth ?? null,
           daysInMonth: result.attendance?.daysInMonth ?? null,
           grossMonthly: result.totals?.gross ?? 0,
+          totalEarning: result.totals?.gross ?? 0,
+          totalDeduction: result.totals?.deductionsTotal ?? 0,
           netMonthly: result.totals?.netPay ?? 0,
+          basicMonthly: earn('BASIC'),
+          hraMonthly: earn('HRA'),
+          foodMonthly: earn('FOOD'),
+          specialMonthly: earn('SPECIAL'),
+          esiEmployee: esi.employee ?? 0,
           pfEmployee: pf.employee ?? 0,
           pfEmployer: pf.employer ?? 0,
           pfSlab: result.pfSlab || null,
