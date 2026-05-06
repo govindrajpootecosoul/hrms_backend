@@ -106,6 +106,16 @@ function normalizeEmpCode(value) {
   return s ? s : null;
 }
 
+function buildPayrollCompanyClause(payrollCompany) {
+  const pc = String(payrollCompany || '').trim();
+  if (!pc || pc === 'all') return null;
+  // Back-compat: older values may be stored as 'BeaconIQ' (no space)
+  if (pc === 'Beacon IQ') {
+    return { $in: ['Beacon IQ', 'BeaconIQ'] };
+  }
+  return pc;
+}
+
 function yyyyMmDdLocal(d) {
   const yyyy = d.getFullYear();
   const mm = String(d.getMonth() + 1).padStart(2, '0');
@@ -751,6 +761,7 @@ async function attendanceStats(req, res) {
     await connectMongo();
     const date = firstQueryValue(req.query.date, new Date().toISOString().split('T')[0]);
     const department = firstQueryValue(req.query.department, 'all');
+    const payrollCompany = firstQueryValue(req.query.payrollCompany, null);
     
     const db = await getEmployeeDbForHrms(effectiveCompany);
     let col = db.collection('employee_checkins');
@@ -764,7 +775,10 @@ async function attendanceStats(req, res) {
     try {
       const usersCol = await getUsersCollection(null, companyName);
       // IMPORTANT: employee_details is in main_db, but must be filtered by company
-      const allEmployees = await usersCol.find({ company: companyName }).toArray();
+      const query = { company: companyName };
+      const pcClause = buildPayrollCompanyClause(payrollCompany);
+      if (pcClause) query.payrollCompany = pcClause;
+      const allEmployees = await usersCol.find(query).toArray();
 
       const normalizeDept = (v) => String(v || '').trim().toLowerCase();
       const requestedDept = normalizeDept(department);
@@ -1256,6 +1270,7 @@ async function attendanceStatsByDepartment(req, res) {
 
     const date = firstQueryValue(req.query.date, new Date().toISOString().split('T')[0]);
     const departmentFilter = firstQueryValue(req.query.department, 'all'); // optional
+    const payrollCompany = firstQueryValue(req.query.payrollCompany, null);
 
     const db = await getEmployeeDbForHrms(effectiveCompany);
     const checkinsCol = db.collection('employee_checkins');
@@ -1266,7 +1281,10 @@ async function attendanceStatsByDepartment(req, res) {
 
     // 1) Load employees once and group by department (active only for attendance math).
     const usersCol = await getUsersCollection(null, companyName);
-    const allEmployees = await usersCol.find({ company: companyName }).toArray();
+    const query = { company: companyName };
+    const pcClause = buildPayrollCompanyClause(payrollCompany);
+    if (pcClause) query.payrollCompany = pcClause;
+    const allEmployees = await usersCol.find(query).toArray();
 
     const normalizeDept = (v) => String(v || '').trim().toLowerCase();
     const requestedDept = normalizeDept(departmentFilter);
@@ -1551,6 +1569,7 @@ async function attendanceStatsTrends(req, res) {
     const daysRaw = firstQueryValue(req.query.days, '7');
     const days = Math.max(1, Math.min(31, parseInt(daysRaw, 10) || 7));
     const departmentFilter = firstQueryValue(req.query.department, 'all'); // optional
+    const payrollCompany = firstQueryValue(req.query.payrollCompany, null);
 
     const endDate = new Date(endDateStr);
     if (!isValidDate(endDate)) {
@@ -1565,7 +1584,10 @@ async function attendanceStatsTrends(req, res) {
     const companyName = effectiveCompany;
 
     const usersCol = await getUsersCollection(null, companyName);
-    const allEmployees = await usersCol.find({ company: companyName }).toArray();
+    const query = { company: companyName };
+    const pcClause = buildPayrollCompanyClause(payrollCompany);
+    if (pcClause) query.payrollCompany = pcClause;
+    const allEmployees = await usersCol.find(query).toArray();
 
     const normalizeDept = (v) => String(v || '').trim().toLowerCase();
     const requestedDept = normalizeDept(departmentFilter);

@@ -112,14 +112,24 @@ router.get('/payroll/employees-month-overview', async (req, res) => {
     }
 
     const usersCol = await getUsersCollection(null, company);
+    const payrollCompany = String(req.query.payrollCompany || '').trim();
+    const query = { company, isActive: { $ne: false } };
+    if (payrollCompany && payrollCompany !== 'all') {
+      if (payrollCompany === 'Beacon IQ') {
+        query.payrollCompany = { $in: ['Beacon IQ', 'BeaconIQ'] };
+      } else {
+        query.payrollCompany = payrollCompany;
+      }
+    }
     const users = await usersCol
-      .find({ company, isActive: { $ne: false } })
+      .find(query)
       .project({
         name: 1,
         email: 1,
         employeeId: 1,
         department: 1,
         jobTitle: 1,
+        payrollCompany: 1,
         annualCtc: 1,
         emp_code: 1,
         pfRule: 1,
@@ -204,6 +214,7 @@ router.get('/payroll/employees-month-overview', async (req, res) => {
           email: emp.email || '',
           department: emp.department || '',
           jobTitle: emp.jobTitle || '',
+          payrollCompany: emp.payrollCompany || '',
           annualCtc,
           joiningDate: emp.joiningDate || null,
           bankAccount: emp.bankAccount || '',

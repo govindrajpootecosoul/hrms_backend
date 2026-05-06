@@ -13,7 +13,7 @@ async function listEmployees(req, res) {
     const company = requireCompany(req, res);
     if (!company) return;
     await connectMongo();
-    const { search, department, status } = req.query;
+    const { search, department, status, payrollCompany } = req.query;
     
     const { getUsersCollection } = require('../../../config/mongo');
     let usersCol;
@@ -26,6 +26,16 @@ async function listEmployees(req, res) {
     
     // Build query (always scope to company)
     const query = { company };
+    if (payrollCompany && payrollCompany !== 'all') {
+      const pc = String(payrollCompany).trim();
+      if (pc) {
+        if (pc === 'Beacon IQ') {
+          query.payrollCompany = { $in: ['Beacon IQ', 'BeaconIQ'] };
+        } else {
+          query.payrollCompany = pc;
+        }
+      }
+    }
     
     if (search) {
       query.$or = [
@@ -68,6 +78,7 @@ async function listEmployees(req, res) {
       phone: emp.phone || emp.mobile || '',
       joiningDate: emp.joiningDate || emp.createdAt || null,
       location: emp.location || '',
+      payrollCompany: emp.payrollCompany || '',
       // IMPORTANT: Attendance APIs use `emp_code` as the biometric/employee code identifier.
       // Expose it as `biometricId` so UI filters (Absent/Present sets) match correctly.
       biometricId: emp.emp_code || emp.biometricId || emp.employeeId || emp.email?.split('@')[0] || ''

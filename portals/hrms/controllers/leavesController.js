@@ -18,6 +18,39 @@ function normalizeEmpCode(value) {
   return s ? s : null;
 }
 
+function buildPayrollCompanyClause(payrollCompany) {
+  const pc = String(payrollCompany || '').trim();
+  if (!pc || pc === 'all') return null;
+  // Back-compat: older values may be stored as 'BeaconIQ' (no space)
+  if (pc === 'Beacon IQ') {
+    return { $in: ['Beacon IQ', 'BeaconIQ'] };
+  }
+  return pc;
+}
+
+async function getEmployeeIdsForPayrollCompany({ company, payrollCompany }) {
+  const pcClause = buildPayrollCompanyClause(payrollCompany);
+  if (!pcClause) return null;
+
+  const usersCol = await getUsersCollection(null, company);
+  const employees = await usersCol
+    .find({ company, payrollCompany: pcClause })
+    .project({ employeeId: 1, email: 1 })
+    .toArray();
+
+  const ids = new Set();
+  for (const e of employees) {
+    if (e?.employeeId) ids.add(String(e.employeeId).trim());
+    if (e?.email) {
+      const em = String(e.email).trim();
+      ids.add(em);
+      const prefix = em.split('@')[0];
+      if (prefix) ids.add(prefix);
+    }
+  }
+  return Array.from(ids).filter((x) => x && x !== 'undefined' && x !== 'null');
+}
+
 function parseTimeWindowHm(timeWindow) {
   if (!timeWindow) return null;
   const m = String(timeWindow).trim().match(/(\d{1,2}:\d{2})\s*-\s*(\d{1,2}:\d{2})/);
@@ -190,6 +223,7 @@ async function listAttendanceRequests(req, res) {
     await connectMongo();
     const status = req.query.status || 'all'; // 'all', 'pending', 'approved', 'rejected'
     const type = req.query.type || 'all'; // 'all', 'regularization', 'on-duty', 'time-off'
+    const payrollCompany = req.query.payrollCompany || null;
     
     const db = await getEmployeeDbForHrms(company);
     const col = db.collection('attendance_requests');
@@ -204,6 +238,14 @@ async function listAttendanceRequests(req, res) {
     }
     if (company) {
       query.company = company;
+    }
+
+    const allowedEmployeeIds = await getEmployeeIdsForPayrollCompany({ company, payrollCompany });
+    if (Array.isArray(allowedEmployeeIds)) {
+      if (allowedEmployeeIds.length === 0) {
+        return res.json({ success: true, data: { requests: [] } });
+      }
+      query.employeeId = { $in: allowedEmployeeIds };
     }
 
     const requests = await col
@@ -250,12 +292,24 @@ async function leaveOverviewStats(req, res) {
     const company = requireCompany(req, res);
     if (!company) return;
     await connectMongo();
+    const payrollCompany = req.query.payrollCompany || null;
     const db = await getEmployeeDbForHrms(company);
     const requestsCol = db.collection('attendance_requests');
 
     const query = { type: 'time-off' };
     if (company) {
       query.company = company;
+    }
+
+    const allowedEmployeeIds = await getEmployeeIdsForPayrollCompany({ company, payrollCompany });
+    if (Array.isArray(allowedEmployeeIds)) {
+      if (allowedEmployeeIds.length === 0) {
+        return res.json({
+          success: true,
+          data: { totalOnLeave: 0, leaveForApproval: 0, approvedThisMonth: 0, rejectedThisMonth: 0 },
+        });
+      }
+      query.employeeId = { $in: allowedEmployeeIds };
     }
     
     const allRequests = await requestsCol.find(query).toArray();
@@ -321,6 +375,7 @@ async function leaveUtilization(req, res) {
     if (!company) return;
     await connectMongo();
     const year = req.query.year || new Date().getFullYear();
+    const payrollCompany = req.query.payrollCompany || null;
     const db = await getEmployeeDbForHrms(company);
     const requestsCol = db.collection('attendance_requests');
 
@@ -331,6 +386,14 @@ async function leaveUtilization(req, res) {
     if (company) {
       query.company = company;
     }
+
+    const allowedEmployeeIds = await getEmployeeIdsForPayrollCompany({ company, payrollCompany });
+    if (Array.isArray(allowedEmployeeIds)) {
+      if (allowedEmployeeIds.length === 0) {
+        return res.json({ success: true, data: { utilization: [], year } });
+      }
+      query.employeeId = { $in: allowedEmployeeIds };
+    }
     
     const approvedRequests = await requestsCol.find(query).toArray();
     
@@ -338,7 +401,10 @@ async function leaveUtilization(req, res) {
     const { getUsersCollection } = require('../../../config/mongo');
     let companyName = company || 'Ecosoul Home';
     const usersCol = await getUsersCollection(null, companyName);
-    const employees = await usersCol.find({}).toArray();
+    const empQuery = { company: companyName };
+    const pcClause = buildPayrollCompanyClause(payrollCompany);
+    if (pcClause) empQuery.payrollCompany = pcClause;
+    const employees = await usersCol.find(empQuery).toArray();
     const employeeMap = new Map();
     employees.forEach(emp => {
       const empId = emp.employeeId || emp.email?.split('@')[0] || '';
@@ -433,10 +499,21 @@ async function attendanceRequestStats(req, res) {
     const company = requireCompany(req, res);
     if (!company) return;
     await connectMongo();
+    const payrollCompany = req.query.payrollCompany || null;
     const db = await getEmployeeDbForHrms(company);
     const col = db.collection('attendance_requests');
 
     const query = company ? { company } : {};
+    const allowedEmployeeIds = await getEmployeeIdsForPayrollCompany({ company, payrollCompany });
+    if (Array.isArray(allowedEmployeeIds)) {
+      if (allowedEmployeeIds.length === 0) {
+        return res.json({
+          success: true,
+          data: { total: 0, pending: 0, approved: 0, rejected: 0, approvedToday: 0, rejectedToday: 0 },
+        });
+      }
+      query.employeeId = { $in: allowedEmployeeIds };
+    }
     
     const total = await col.countDocuments(query);
     const pending = await col.countDocuments({ ...query, status: 'pending' });

@@ -88,7 +88,7 @@ function isDummyUser(user) {
 
 async function listUsers(req, res) {
   try {
-    const { filterDummy, company } = req.query;
+    const { filterDummy, company, payrollCompany } = req.query;
     const shouldFilterDummy = filterDummy === 'true';
     
     const normalized = (v) => {
@@ -108,6 +108,17 @@ async function listUsers(req, res) {
     
     const usersCol = await getUsersCollectionForRequest(req);
     const query = { company: resolvedCompany };
+    if (payrollCompany && payrollCompany !== 'all') {
+      const pc = String(payrollCompany).trim();
+      if (pc) {
+        // Back-compat: older values may be stored as 'BeaconIQ' (no space)
+        if (pc === 'Beacon IQ') {
+          query.payrollCompany = { $in: ['Beacon IQ', 'BeaconIQ'] };
+        } else {
+          query.payrollCompany = pc;
+        }
+      }
+    }
     const allUsers = await usersCol.find(query).toArray();
     
     console.log(`[admin-users] Fetched ${allUsers.length} users from employee_details in ${LOGIN_DB_NAME} for company: ${resolvedCompany}`);
@@ -159,6 +170,7 @@ async function listUsers(req, res) {
       
       // Work details
       jobTitle: user.jobTitle || '',
+      payrollCompany: user.payrollCompany || '',
       location: user.location || '',
       reportingManager: user.reportingManager || '',
       joiningDate: user.joiningDate || '',
@@ -563,7 +575,7 @@ async function createUser(req, res) {
       emergencyContact,
       emergencyPhone,
       // Work details
-      jobTitle, location, reportingManager, joiningDate, exitDate, card_no, emp_code,
+      jobTitle, payrollCompany, location, reportingManager, joiningDate, exitDate, card_no, emp_code,
       // Bank & Insurance
       bankAccount, ifsc, pan, aadhaar, uan, esiNo, pfNo
     } = req.body;
@@ -652,6 +664,7 @@ async function createUser(req, res) {
       
       // Work details
       jobTitle: jobTitle || '',
+      payrollCompany: payrollCompany || '',
       location: location || '',
       reportingManager: reportingManager || '',
       joiningDate: joiningDate || '',
@@ -786,7 +799,7 @@ async function updateUser(req, res) {
       emergencyContact,
       emergencyPhone,
       // Work details
-      jobTitle, location, reportingManager, joiningDate, exitDate, card_no, emp_code,
+      jobTitle, payrollCompany, location, reportingManager, joiningDate, exitDate, card_no, emp_code,
       // Bank & Insurance
       bankAccount, ifsc, pan, aadhaar, uan, esiNo, pfNo,
       // Payroll
@@ -909,6 +922,7 @@ async function updateUser(req, res) {
     
     // Work details - Only update if provided
     if (jobTitle !== undefined) updateData.jobTitle = jobTitle;
+    if (payrollCompany !== undefined) updateData.payrollCompany = payrollCompany;
     if (location !== undefined) updateData.location = location;
     if (reportingManager !== undefined) updateData.reportingManager = reportingManager;
     if (joiningDate !== undefined) updateData.joiningDate = joiningDate;
