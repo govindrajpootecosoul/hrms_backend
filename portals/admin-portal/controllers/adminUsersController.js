@@ -167,6 +167,9 @@ async function listUsers(req, res) {
       presentAddress: user.presentAddress || '',
       permanentAddress: user.permanentAddress || '',
       emergencyPhone: user.emergencyPhone || '',
+      emergencyRelation: user.emergencyRelation || '',
+      familyDetails: user.familyDetails || '',
+      age: user.age || '',
       
       // Work details
       jobTitle: user.jobTitle || '',
@@ -181,8 +184,11 @@ async function listUsers(req, res) {
       // Bank & Insurance
       bankAccount: user.bankAccount || '',
       ifsc: user.ifsc || '',
+      bankName: user.bankName || '',
       pan: user.pan || '',
       aadhaar: user.aadhaar || '',
+      rationNumber: user.rationNumber || '',
+      bankBranchName: user.bankBranchName || '',
       uan: user.uan || '',
       esiNo: user.esiNo || '',
       pfNo: user.pfNo || '',
@@ -563,6 +569,7 @@ async function createUser(req, res) {
       fatherName,
       dateOfBirth,
       actualDob,
+      age,
       gender,
       maritalStatus,
       bloodGroup,
@@ -574,10 +581,12 @@ async function createUser(req, res) {
       zipCode,
       emergencyContact,
       emergencyPhone,
+      emergencyRelation,
+      familyDetails,
       // Work details
       jobTitle, payrollCompany, location, reportingManager, joiningDate, exitDate, card_no, emp_code,
       // Bank & Insurance
-      bankAccount, ifsc, pan, aadhaar, uan, esiNo, pfNo
+      bankAccount, ifsc, bankName, bankBranchName, pan, aadhaar, rationNumber, uan, esiNo, pfNo
     } = req.body;
     const { company } = req.query; // Get company from query parameter (for collection selection)
 
@@ -650,6 +659,7 @@ async function createUser(req, res) {
       fatherName: fatherName || '',
       dateOfBirth: dateOfBirth || '',
       actualDob: actualDob || '',
+      age: age || '',
       gender: gender || '',
       maritalStatus: maritalStatus || '',
       bloodGroup: bloodGroup || '',
@@ -661,6 +671,8 @@ async function createUser(req, res) {
       zipCode: zipCode || '',
       emergencyContact: emergencyContact || '',
       emergencyPhone: emergencyPhone || '',
+      emergencyRelation: emergencyRelation || '',
+      familyDetails: familyDetails || '',
       
       // Work details
       jobTitle: jobTitle || '',
@@ -675,8 +687,11 @@ async function createUser(req, res) {
       // Bank & Insurance
       bankAccount: bankAccount || '',
       ifsc: ifsc || '',
+      bankName: bankName || '',
+      bankBranchName: bankBranchName || '',
       pan: pan || '',
       aadhaar: aadhaar || '',
+      rationNumber: rationNumber || '',
       uan: uan || '',
       esiNo: esiNo || '',
       pfNo: pfNo || '',
@@ -732,6 +747,7 @@ async function createUser(req, res) {
         fatherName: newUser.fatherName,
         dateOfBirth: newUser.dateOfBirth,
         actualDob: newUser.actualDob,
+        age: newUser.age,
         gender: newUser.gender,
         maritalStatus: newUser.maritalStatus,
         bloodGroup: newUser.bloodGroup,
@@ -743,6 +759,8 @@ async function createUser(req, res) {
         zipCode: newUser.zipCode,
         emergencyContact: newUser.emergencyContact,
         emergencyPhone: newUser.emergencyPhone,
+        emergencyRelation: newUser.emergencyRelation,
+        familyDetails: newUser.familyDetails,
         jobTitle: newUser.jobTitle,
         location: newUser.location,
         reportingManager: newUser.reportingManager,
@@ -752,8 +770,11 @@ async function createUser(req, res) {
         emp_code: newUser.emp_code,
         bankAccount: newUser.bankAccount,
         ifsc: newUser.ifsc,
+        bankName: newUser.bankName,
+        bankBranchName: newUser.bankBranchName,
         pan: newUser.pan,
         aadhaar: newUser.aadhaar,
+        rationNumber: newUser.rationNumber,
         uan: newUser.uan,
         esiNo: newUser.esiNo,
         pfNo: newUser.pfNo,
@@ -787,6 +808,7 @@ async function updateUser(req, res) {
       fatherName,
       dateOfBirth,
       actualDob,
+      age,
       gender,
       maritalStatus,
       bloodGroup,
@@ -798,10 +820,12 @@ async function updateUser(req, res) {
       zipCode,
       emergencyContact,
       emergencyPhone,
+      emergencyRelation,
+      familyDetails,
       // Work details
       jobTitle, payrollCompany, location, reportingManager, joiningDate, exitDate, card_no, emp_code,
       // Bank & Insurance
-      bankAccount, ifsc, pan, aadhaar, uan, esiNo, pfNo,
+      bankAccount, ifsc, bankName, bankBranchName, pan, aadhaar, rationNumber, uan, esiNo, pfNo,
       // Payroll
       annualCtc,
       pfRule,
@@ -908,6 +932,7 @@ async function updateUser(req, res) {
     if (fatherName !== undefined) updateData.fatherName = fatherName;
     if (dateOfBirth !== undefined) updateData.dateOfBirth = dateOfBirth;
     if (actualDob !== undefined) updateData.actualDob = actualDob;
+    if (age !== undefined) updateData.age = age;
     if (gender !== undefined) updateData.gender = gender;
     if (maritalStatus !== undefined) updateData.maritalStatus = maritalStatus;
     if (bloodGroup !== undefined) updateData.bloodGroup = bloodGroup;
@@ -919,6 +944,8 @@ async function updateUser(req, res) {
     if (zipCode !== undefined) updateData.zipCode = zipCode;
     if (emergencyContact !== undefined) updateData.emergencyContact = emergencyContact;
     if (emergencyPhone !== undefined) updateData.emergencyPhone = emergencyPhone;
+    if (emergencyRelation !== undefined) updateData.emergencyRelation = emergencyRelation;
+    if (familyDetails !== undefined) updateData.familyDetails = familyDetails;
     
     // Work details - Only update if provided
     if (jobTitle !== undefined) updateData.jobTitle = jobTitle;
@@ -932,8 +959,11 @@ async function updateUser(req, res) {
     // Bank & Insurance - Only update if provided
     if (bankAccount !== undefined) updateData.bankAccount = bankAccount;
     if (ifsc !== undefined) updateData.ifsc = ifsc;
+    if (bankName !== undefined) updateData.bankName = bankName;
+    if (bankBranchName !== undefined) updateData.bankBranchName = bankBranchName;
     if (pan !== undefined) updateData.pan = pan;
     if (aadhaar !== undefined) updateData.aadhaar = aadhaar;
+    if (rationNumber !== undefined) updateData.rationNumber = rationNumber;
     if (uan !== undefined) updateData.uan = uan;
     if (esiNo !== undefined) updateData.esiNo = esiNo;
     if (pfNo !== undefined) updateData.pfNo = pfNo;
