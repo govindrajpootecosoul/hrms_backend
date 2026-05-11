@@ -1,4 +1,4 @@
-require('dotenv').config();
+require('dotenv').config({ override: true });
 
 /**
  * Centralized application configuration — URLs, ports, and DB hosts come from .env only

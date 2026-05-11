@@ -12,6 +12,48 @@ const {
 } = require('../utils/hrmsContext');
 const { emitAttendanceChanged } = require('../../../lib/attendanceEvents');
 
+const LEAVE_BALANCES_COLLECTION = 'leave_balances';
+const LEAVE_BALANCE_HISTORY_COLLECTION = 'leave_balance_history';
+const DEFAULT_LEAVE_BALANCES = {
+  'Casual Leave': 0,
+  'Sick Leave': 0,
+  'Earned Leave': 0,
+  'Work From Home': 0,
+  'Compensatory Off': 0,
+  'LOP': 0,
+};
+
+function normalizeLeaveTypeKey(leaveType) {
+  const raw = String(leaveType || '').trim();
+  if (!raw) return null;
+  // accept common variants
+  const map = new Map(
+    Object.keys(DEFAULT_LEAVE_BALANCES).map((k) => [k.toLowerCase(), k])
+  );
+  const cleaned = raw.toLowerCase();
+  if (map.has(cleaned)) return map.get(cleaned);
+  if (cleaned === 'loss of pay') return 'LOP';
+  if (cleaned === 'comp off' || cleaned === 'compoff') return 'Compensatory Off';
+  if (cleaned === 'wfh') return 'Work From Home';
+  return raw; // allow custom types without blocking
+}
+
+function safeInt(n, fallback = 0) {
+  const x = Number(n);
+  if (!Number.isFinite(x)) return fallback;
+  return Math.trunc(x);
+}
+
+async function getLeaveBalancesCol(company) {
+  const db = await getEmployeeDbForHrms(company);
+  return db.collection(LEAVE_BALANCES_COLLECTION);
+}
+
+async function getLeaveBalanceHistoryCol(company) {
+  const db = await getEmployeeDbForHrms(company);
+  return db.collection(LEAVE_BALANCE_HISTORY_COLLECTION);
+}
+
 function normalizeEmpCode(value) {
   if (value == null || value === '') return null;
   const s = String(value).trim();
@@ -213,6 +255,167 @@ async function listLeaves(req, res) {
       success: false,
       error: 'Internal server error'
     });
+  }
+}
+
+async function listLeaveBalances(req, res) {
+  try {
+    const company = requireCompany(req, res);
+    if (!company) return;
+    await connectMongo();
+
+    const employeeId = (req.query.employeeId || '').toString().trim();
+    const col = await getLeaveBalancesCol(company);
+
+    const query = { company };
+    if (employeeId) query.employeeId = employeeId;
+
+    const rows = await col.find(query).sort({ employeeId: 1 }).toArray();
+    const data = rows.map((r) => ({
+      id: r._id?.toString?.() || String(r._id),
+      employeeId: r.employeeId,
+      balances: { ...DEFAULT_LEAVE_BALANCES, ...(r.balances || {}) },
+      updatedAt: r.updatedAt || r.createdAt || null,
+      company: r.company,
+    }));
+
+    return res.json({ success: true, data: { balances: data } });
+  } catch (error) {
+    console.error('[hrms-portal] listLeaveBalances error:', error);
+    return res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+}
+
+async function getLeaveBalance(req, res) {
+  try {
+    const company = requireCompany(req, res);
+    if (!company) return;
+    await connectMongo();
+
+    const employeeId = String(req.params.employeeId || '').trim();
+    if (!employeeId) return res.status(400).json({ success: false, error: 'employeeId is required' });
+
+    const col = await getLeaveBalancesCol(company);
+    const doc = await col.findOne({ company, employeeId });
+    return res.json({
+      success: true,
+      data: {
+        employeeId,
+        balances: { ...DEFAULT_LEAVE_BALANCES, ...(doc?.balances || {}) },
+        updatedAt: doc?.updatedAt || doc?.createdAt || null,
+      },
+    });
+  } catch (error) {
+    console.error('[hrms-portal] getLeaveBalance error:', error);
+    return res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+}
+
+async function adjustLeaveBalance(req, res) {
+  try {
+    const company = requireCompany(req, res);
+    if (!company) return;
+    await connectMongo();
+
+    const employeeId = String(req.params.employeeId || '').trim();
+    if (!employeeId) return res.status(400).json({ success: false, error: 'employeeId is required' });
+
+    const { leaveType, delta, reason, performedBy } = req.body || {};
+    const leaveKey = normalizeLeaveTypeKey(leaveType);
+    if (!leaveKey) return res.status(400).json({ success: false, error: 'leaveType is required' });
+
+    const inc = safeInt(delta, 0);
+    if (!inc) return res.status(400).json({ success: false, error: 'delta must be a non-zero number' });
+
+    const col = await getLeaveBalancesCol(company);
+    const historyCol = await getLeaveBalanceHistoryCol(company);
+
+    // Read current to clamp at 0 (no negative balances).
+    const existing = await col.findOne({ company, employeeId }, { projection: { balances: 1 } });
+    const prevBalances = { ...DEFAULT_LEAVE_BALANCES, ...(existing?.balances || {}) };
+    const prevValue = safeInt(prevBalances[leaveKey], 0);
+    const nextValue = Math.max(0, prevValue + inc);
+    const appliedDelta = nextValue - prevValue;
+    if (appliedDelta === 0) {
+      return res.json({
+        success: true,
+        message: 'No change (balance already at minimum)',
+        data: { employeeId, leaveType: leaveKey, previous: prevValue, next: nextValue },
+      });
+    }
+
+    const now = new Date();
+    await col.updateOne(
+      { company, employeeId },
+      {
+        $set: { updatedAt: now },
+        $setOnInsert: { company, employeeId, createdAt: now },
+        $inc: { [`balances.${leaveKey}`]: appliedDelta },
+      },
+      { upsert: true }
+    );
+
+    const historyDoc = {
+      company,
+      employeeId,
+      leaveType: leaveKey,
+      delta: appliedDelta,
+      previous: prevValue,
+      next: nextValue,
+      reason: typeof reason === 'string' ? reason.trim() : '',
+      performedBy: typeof performedBy === 'string' ? performedBy.trim() : 'HR',
+      createdAt: now,
+    };
+    await historyCol.insertOne(historyDoc);
+
+    emitAttendanceChanged({ company, type: 'leave_balance_adjusted', date: now.toISOString().slice(0, 10) });
+
+    return res.json({
+      success: true,
+      message: 'Leave balance updated',
+      data: { employeeId, leaveType: leaveKey, previous: prevValue, next: nextValue, delta: appliedDelta },
+    });
+  } catch (error) {
+    console.error('[hrms-portal] adjustLeaveBalance error:', error);
+    return res.status(500).json({ success: false, error: error.message || 'Internal server error' });
+  }
+}
+
+async function getLeaveBalanceHistory(req, res) {
+  try {
+    const company = requireCompany(req, res);
+    if (!company) return;
+    await connectMongo();
+
+    const employeeId = String(req.params.employeeId || '').trim();
+    if (!employeeId) return res.status(400).json({ success: false, error: 'employeeId is required' });
+
+    const historyCol = await getLeaveBalanceHistoryCol(company);
+    const rows = await historyCol
+      .find({ company, employeeId })
+      .sort({ createdAt: -1, _id: -1 })
+      .limit(200)
+      .toArray();
+
+    return res.json({
+      success: true,
+      data: {
+        employeeId,
+        history: rows.map((r) => ({
+          id: r._id?.toString?.() || String(r._id),
+          leaveType: r.leaveType,
+          delta: r.delta,
+          previous: r.previous,
+          next: r.next,
+          reason: r.reason || '',
+          performedBy: r.performedBy || '',
+          createdAt: r.createdAt,
+        })),
+      },
+    });
+  } catch (error) {
+    console.error('[hrms-portal] getLeaveBalanceHistory error:', error);
+    return res.status(500).json({ success: false, error: 'Internal server error' });
   }
 }
 
@@ -1016,6 +1219,10 @@ async function createAttendanceRequest(req, res) {
 
 module.exports = {
   listLeaves,
+  listLeaveBalances,
+  getLeaveBalance,
+  adjustLeaveBalance,
+  getLeaveBalanceHistory,
   listAttendanceRequests,
   leaveOverviewStats,
   leaveUtilization,

@@ -14,6 +14,26 @@ function normalizeEmpCode(value) {
   return s ? s : null;
 }
 
+/** Values to match Mongo fields that may store emp_code as number or string. */
+function empCodeVariantsForQuery(codeStr) {
+  if (!codeStr) return [];
+  const out = [codeStr];
+  const n = Number(codeStr);
+  if (Number.isFinite(n) && String(n) === codeStr) out.push(n);
+  return out;
+}
+
+function machineDocMatchesEmpCode(doc, targetEmpCodeStr) {
+  const raw = doc?.emp_code ?? doc?.empCode ?? doc?.employeeCode ?? doc?.employee_code;
+  const a = normalizeEmpCode(raw);
+  const b = normalizeEmpCode(targetEmpCodeStr);
+  if (a == null || b == null) return false;
+  if (a === b) return true;
+  const na = Number(a);
+  const nb = Number(b);
+  return Number.isFinite(na) && Number.isFinite(nb) && na === nb;
+}
+
 function isValidDate(d) {
   return d instanceof Date && !Number.isNaN(d.getTime());
 }
@@ -68,8 +88,10 @@ async function getMachineAttendanceForRange(range) {
 
 async function getMachineAttendance(req, res) {
   try {
-    const company = getCompanyFromRequest(req);
-    if (!company) return res.status(400).json({ success: false, error: 'company is required' });
+    // company is preferred for scoping, but must be optional because some logins/tokens
+    // don't include it. When missing, we resolve employee first and then derive company
+    // from the employee profile (if available).
+    let company = getCompanyFromRequest(req) || null;
 
     const range = parseDateRange(req);
     if (!range) {
@@ -80,33 +102,97 @@ async function getMachineAttendance(req, res) {
     }
 
     const empCodeRaw = firstQueryValue(req.query.empCode, null) || firstQueryValue(req.query.employeeCode, null);
-    const empCode = normalizeEmpCode(empCodeRaw);
-    if (!empCode) {
-      return res.status(400).json({ success: false, error: 'empCode is required' });
+    const employeeIdRaw = firstQueryValue(req.query.employeeId, null);
+    const employeeId = employeeIdRaw && String(employeeIdRaw).trim() ? String(employeeIdRaw).trim() : null;
+    const empCodeFromQuery = normalizeEmpCode(empCodeRaw);
+    let empCode = empCodeFromQuery;
+
+    if (!empCode && !employeeId) {
+      return res.status(400).json({ success: false, error: 'empCode or employeeId is required' });
     }
 
     await connectMongo();
 
-    // Company scoping: only allow emp codes that belong to this company.
+    // Company scoping: prefer employeeId (portal login) so machine rows match the logged-in user even if empCode in the client is missing or wrong.
     const usersCol = await getUsersCollection(null, company);
-    const employee = await usersCol.findOne(
-      { company, emp_code: empCode },
-      { projection: { emp_code: 1, name: 1, employeeId: 1, email: 1, department: 1 } }
-    );
+    let employee = null;
+
+    if (employeeId) {
+      const q = { $or: [{ employeeId: employeeId }, { employee_id: employeeId }] };
+      if (company) q.company = company;
+      employee = await usersCol.findOne(
+        q,
+        { projection: { company: 1, emp_code: 1, empCode: 1, employeeCode: 1, employee_code: 1, name: 1, employeeId: 1, email: 1, department: 1 } }
+      );
+      if (employee) {
+        if (!company && employee.company) company = String(employee.company).trim() || null;
+        const fromProfile =
+          employee.emp_code ??
+          employee.empCode ??
+          employee.employeeCode ??
+          employee.employee_code ??
+          null;
+        empCode = normalizeEmpCode(fromProfile) || empCode;
+      }
+    }
+
+    if (!employee && empCodeFromQuery) {
+      const variants = empCodeVariantsForQuery(empCodeFromQuery);
+      const q = {
+        $or: [
+          { emp_code: { $in: variants } },
+          { empCode: { $in: variants } },
+          { employeeCode: { $in: variants } },
+          { employee_code: { $in: variants } },
+        ],
+      };
+      if (company) q.company = company;
+      employee = await usersCol.findOne(
+        q,
+        { projection: { company: 1, emp_code: 1, empCode: 1, employeeCode: 1, employee_code: 1, name: 1, employeeId: 1, email: 1, department: 1 } }
+      );
+      empCode = normalizeEmpCode(empCodeFromQuery);
+    }
+
     if (!employee) {
-      return res.json({ success: true, data: { empCode, records: [] } });
+      return res.json({ success: true, data: { empCode: empCode || '', records: [] } });
+    }
+
+    if (employeeId) {
+      const docEid = String(employee.employeeId || '').trim();
+      if (docEid && docEid !== employeeId) {
+        return res.status(403).json({ success: false, error: 'employeeId does not match resolved employee' });
+      }
+    }
+
+    if (!empCode) {
+      return res.json({
+        success: true,
+        data: {
+          empCode: '',
+          employee: {
+            name: employee.name || '',
+            employeeId: employee.employeeId || employee.email?.split('@')[0] || '',
+            department: employee.department || '',
+          },
+          records: [],
+        },
+      });
     }
 
     let docs = await getMachineAttendanceForRange(range);
-    docs = docs.filter((d) => normalizeEmpCode(d?.emp_code) === empCode);
+    docs = docs.filter((d) => machineDocMatchesEmpCode(d, empCode));
 
     const records = docs
       .map((d) => {
         const dateRaw = d.date;
-        const dateStr = typeof dateRaw === 'string' ? String(dateRaw) : new Date(dateRaw).toISOString();
+        const dateObj = dateRaw instanceof Date ? dateRaw : new Date(dateRaw);
+        const dateIso = !Number.isNaN(dateObj.getTime()) ? dateObj.toISOString() : null;
+        const date = dateIso ? dateIso.slice(0, 10) : '';
         return {
           empCode,
-          date: dateStr.slice(0, 10),
+          date,
+          dateIso,
           punchIn: d.punch_in != null && String(d.punch_in).trim() !== '' ? String(d.punch_in).trim() : null,
           punchOut: d.punch_out != null && String(d.punch_out).trim() !== '' ? String(d.punch_out).trim() : null,
           status: d.status != null ? String(d.status) : '',
