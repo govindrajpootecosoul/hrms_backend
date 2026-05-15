@@ -33,6 +33,18 @@ async function getUsersCollectionForRequest(req) {
  * @param {Object} user - User object
  * @returns {boolean} - True if user is dummy/test user
  */
+function resolveCompanyFromQuery(company) {
+  if (!company || company === 'undefined' || company === 'all') return null;
+  const lc = String(company).trim().toLowerCase();
+  if (lc.includes('thrive')) return 'Thrive';
+  if (lc.includes('ecosoul') || lc === '1') return 'Ecosoul Home';
+  return String(company).trim();
+}
+
+function normalizeDepartmentName(value) {
+  return String(value || '').trim().toLowerCase();
+}
+
 function isDummyUser(user) {
   const email = (user.email || '').toLowerCase();
   const name = (user.name || '').toLowerCase();
@@ -91,14 +103,7 @@ async function listUsers(req, res) {
     const { filterDummy, company, payrollCompany } = req.query;
     const shouldFilterDummy = filterDummy === 'true';
     
-    const normalized = (v) => {
-      if (!v || v === 'undefined' || v === 'all') return null;
-      const lc = String(v).trim().toLowerCase();
-      if (lc.includes('thrive')) return 'Thrive';
-      if (lc.includes('ecosoul') || lc === '1') return 'Ecosoul Home';
-      return v;
-    };
-    const resolvedCompany = normalized(company);
+    const resolvedCompany = resolveCompanyFromQuery(company);
     if (!resolvedCompany) {
       return res.status(400).json({
         success: false,
@@ -237,30 +242,29 @@ async function listUsers(req, res) {
 async function listDepartments(req, res) {
   try {
     const { company } = req.query;
-    
-    if (!company) {
+    const resolvedCompany = resolveCompanyFromQuery(company);
+
+    if (!resolvedCompany) {
       return res.status(400).json({
         success: false,
         error: 'Company name is required to fetch departments'
       });
     }
-    
-    // Get the appropriate collection based on company
+
     const usersCol = await getUsersCollectionForRequest(req);
-    const collectionName = company.toLowerCase().includes('thrive') ? 'Thrive_Employees' : 'Ecosoul_Employees';
-    
-    console.log(`[admin-users/departments] Fetching departments from ${collectionName} collection for company: ${company}`);
-    
-    // Fetch all users and extract unique departments
-    // Check for both isActive and active fields (some records might use different field names)
-    const users = await usersCol.find({ 
+
+    console.log(`[admin-users/departments] Fetching departments for company: ${resolvedCompany}`);
+
+    // Same source as listUsers (employee_details), scoped to selected company
+    const users = await usersCol.find({
+      company: resolvedCompany,
       $or: [
         { isActive: { $ne: false } },
         { active: { $ne: false } },
-        { isActive: { $exists: false } }, // If field doesn't exist, include it
-        { active: { $exists: false } } // If field doesn't exist, include it
+        { isActive: { $exists: false } },
+        { active: { $exists: false } }
       ],
-      department: { $exists: true, $ne: null, $ne: '' } // Only users with department
+      department: { $exists: true, $ne: null, $ne: '' }
     }).toArray();
     
     console.log(`[admin-users/departments] Found ${users.length} users with departments`);
@@ -268,7 +272,8 @@ async function listDepartments(req, res) {
     // Also try a simpler query if the above returns no results
     if (users.length === 0) {
       console.log(`[admin-users/departments] No users found with first query, trying simpler query...`);
-      const allUsers = await usersCol.find({ 
+      const allUsers = await usersCol.find({
+        company: resolvedCompany,
         department: { $exists: true, $ne: null, $ne: '' }
       }).toArray();
       console.log(`[admin-users/departments] Found ${allUsers.length} total users with departments (without active filter)`);
@@ -287,9 +292,9 @@ async function listDepartments(req, res) {
           success: true,
           departments: departments,
           count: departments.length,
-          company: company,
-          collection: collectionName,
-          message: `Fetched ${departments.length} departments from ${collectionName} collection`
+          company: resolvedCompany,
+          collection: 'employee_details',
+          message: `Fetched ${departments.length} departments for ${resolvedCompany}`
         });
       }
     }
@@ -307,9 +312,9 @@ async function listDepartments(req, res) {
       success: true,
       departments: departments,
       count: departments.length,
-      company: company,
-      collection: collectionName,
-      message: `Fetched ${departments.length} departments from ${collectionName} collection`
+      company: resolvedCompany,
+      collection: 'employee_details',
+      message: `Fetched ${departments.length} departments for ${resolvedCompany}`
     });
   } catch (error) {
     console.error('[Admin Users Departments GET Error]', error);
@@ -451,7 +456,10 @@ async function setDepartmentManager(req, res) {
     }
 
     // Enforce: manager must belong to the same department
-    const mismatched = users.filter((u) => String(u?.department || '').trim() !== normalizedDepartment);
+    const deptKey = normalizeDepartmentName(normalizedDepartment);
+    const mismatched = users.filter(
+      (u) => normalizeDepartmentName(u?.department) !== deptKey
+    );
     if (mismatched.length > 0) {
       return res.status(400).json({
         success: false,
