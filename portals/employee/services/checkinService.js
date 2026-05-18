@@ -26,25 +26,61 @@ function timeHmToIso(dateYmd, hm) {
   return d.toISOString();
 }
 
-async function getMachinePunchForEmployee({ employeeId, company, dateYmd }) {
-  if (!employeeId || !company || !dateYmd) return null;
+function employeeProfileFromDoc(emp) {
+  if (!emp) {
+    return { empCode: null, employeeName: 'Unknown', department: 'General' };
+  }
+  const empCode =
+    emp.emp_code != null && String(emp.emp_code).trim() !== ''
+      ? String(emp.emp_code).trim()
+      : emp.empCode != null && String(emp.empCode).trim() !== ''
+        ? String(emp.empCode).trim()
+        : null;
+  const employeeName =
+    (emp.name && String(emp.name).trim()) ||
+    (emp.firstName && String(emp.firstName).trim()) ||
+    emp.email?.split('@')[0] ||
+    'Unknown';
+  const department = String(emp.department || '').trim() || 'General';
+  return { empCode, employeeName, department };
+}
 
-  // employee_details is stored in login DB (admin) collection employee_details
+async function findEmployeeByEmployeeId({ employeeId, company, projection }) {
+  if (!employeeId || !company) return null;
+
   const usersCol = await getUsersCollection(null, company);
   const employeeKey = String(employeeId).trim();
   const escapeRe = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const emp = await usersCol.findOne(
+  const fields =
+    projection ||
+    { emp_code: 1, empCode: 1, name: 1, firstName: 1, employeeId: 1, email: 1, department: 1 };
+
+  return usersCol.findOne(
     {
       company,
       $or: [
         { employeeId: employeeKey },
         { employeeId: new RegExp(`^${escapeRe(employeeKey)}$`, 'i') },
-        // Some flows store employeeId as full email; allow lookup by prefix.
         { email: new RegExp(`^${escapeRe(employeeKey)}(@|$)`, 'i') },
       ],
     },
-    { projection: { emp_code: 1, name: 1, employeeId: 1, email: 1 } }
+    { projection: fields }
   );
+}
+
+async function resolveEmployeeForCheckin({ employeeId, company }) {
+  const emp = await findEmployeeByEmployeeId({ employeeId, company });
+  return employeeProfileFromDoc(emp);
+}
+
+async function getMachinePunchForEmployee({ employeeId, company, dateYmd }) {
+  if (!employeeId || !company || !dateYmd) return null;
+
+  const emp = await findEmployeeByEmployeeId({
+    employeeId,
+    company,
+    projection: { emp_code: 1, name: 1, employeeId: 1, email: 1 },
+  });
   const empCode = emp?.emp_code != null && String(emp.emp_code).trim() !== '' ? String(emp.emp_code).trim() : null;
   if (!empCode) return null;
 
@@ -176,6 +212,7 @@ async function checkinEmployee({ employeeId, company }) {
   await ensureNotCheckedIn(col, employeeId, today);
 
   const accumulatedMinutes = await computeAccumulatedMinutes(col, employeeId, today);
+  const profile = await resolveEmployeeForCheckin({ employeeId, company });
 
   const checkInTime = new Date();
   const checkInDoc = {
@@ -185,6 +222,9 @@ async function checkinEmployee({ employeeId, company }) {
     checkOutTime: null,
     totalMinutes: accumulatedMinutes,
     status: 'checked-in',
+    empCode: profile.empCode,
+    employeeName: profile.employeeName,
+    department: profile.department,
     createdAt: checkInTime,
     updatedAt: checkInTime,
   };
@@ -196,6 +236,9 @@ async function checkinEmployee({ employeeId, company }) {
     status: 'checked-in',
     totalMinutes: accumulatedMinutes,
     employeeId,
+    empCode: profile.empCode,
+    employeeName: profile.employeeName,
+    department: profile.department,
   };
 }
 
@@ -221,17 +264,23 @@ async function checkoutEmployee({ employeeId, company }) {
   const sessionMinutes = Math.max(0, (checkOutTime.getTime() - checkInTime.getTime()) / 60000);
   const totalMinutes = (checkIn.totalMinutes || 0) + sessionMinutes;
 
-  await col.updateOne(
-    { _id: checkIn._id },
-    {
-      $set: {
-        checkOutTime: checkOutTime.toISOString(),
-        totalMinutes,
-        status: 'checked-out',
-        updatedAt: checkOutTime,
-      },
-    }
-  );
+  const needsProfile =
+    !checkIn.empCode || !checkIn.employeeName || !checkIn.department;
+  const profile = needsProfile ? await resolveEmployeeForCheckin({ employeeId, company }) : null;
+
+  const updateFields = {
+    checkOutTime: checkOutTime.toISOString(),
+    totalMinutes,
+    status: 'checked-out',
+    updatedAt: checkOutTime,
+  };
+  if (needsProfile && profile) {
+    if (!checkIn.empCode && profile.empCode) updateFields.empCode = profile.empCode;
+    if (!checkIn.employeeName && profile.employeeName) updateFields.employeeName = profile.employeeName;
+    if (!checkIn.department && profile.department) updateFields.department = profile.department;
+  }
+
+  await col.updateOne({ _id: checkIn._id }, { $set: updateFields });
 
   return {
     checkOutTime: checkOutTime.toISOString(),
@@ -239,6 +288,9 @@ async function checkoutEmployee({ employeeId, company }) {
     totalHours: (totalMinutes / 60).toFixed(2),
     status: 'checked-out',
     employeeId,
+    empCode: checkIn.empCode || profile?.empCode || null,
+    employeeName: checkIn.employeeName || profile?.employeeName || null,
+    department: checkIn.department || profile?.department || null,
   };
 }
 
@@ -398,6 +450,9 @@ async function getHistory({ employeeId, company, limit = 30 }) {
       totalMinutes: record.totalMinutes,
       totalHours: record.totalMinutes ? (record.totalMinutes / 60).toFixed(2) : 0,
       status: record.status,
+      empCode: record.empCode || record.emp_code || null,
+      employeeName: record.employeeName || record.name || null,
+      department: record.department || null,
     })),
   };
 }

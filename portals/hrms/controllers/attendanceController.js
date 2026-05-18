@@ -453,12 +453,20 @@ async function listAttendance(req, res) {
         const checkInTime = parseCheckTime(record.checkInTime);
         const checkOutTime = parseCheckTime(record.checkOutTime);
 
+        const storedEmpCode = normalizeEmpCode(record.empCode || record.emp_code);
         const employeeInfo = employeeByEmployeeId.get(record.employeeId) || {
-          name: record.employeeId || 'Unknown',
-          department: 'General',
+          name: record.employeeName || record.name || record.employeeId || 'Unknown',
+          department: record.department || 'General',
           employeeId: record.employeeId || null,
-          empCode: null,
+          empCode: storedEmpCode || null,
         };
+        if (storedEmpCode && !employeeInfo.empCode) employeeInfo.empCode = storedEmpCode;
+        if (record.employeeName && (!employeeInfo.name || employeeInfo.name === 'Unknown')) {
+          employeeInfo.name = record.employeeName;
+        }
+        if (record.department && employeeInfo.department === 'General') {
+          employeeInfo.department = record.department;
+        }
 
         const timeIn = timeHmFromDate(checkInTime);
         const timeOut = timeHmFromDate(checkOutTime);
