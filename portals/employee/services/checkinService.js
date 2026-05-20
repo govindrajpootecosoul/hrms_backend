@@ -26,6 +26,41 @@ function timeHmToIso(dateYmd, hm) {
   return d.toISOString();
 }
 
+/** punch_out in DB is office wall-clock "HH:MM" (e.g. "17:58"). */
+function isPunchHmAtOrAfter3pm(hm) {
+  if (!hm) return false;
+  const [h, m] = String(hm).split(':').map(Number);
+  if (!Number.isFinite(h)) return false;
+  return h > 15 || (h === 15 && (Number.isFinite(m) ? m >= 0 : true));
+}
+
+function minutesBetweenIso(inIso, outIso) {
+  if (!inIso || !outIso) return 0;
+  const a = new Date(inIso).getTime();
+  const b = new Date(outIso).getTime();
+  if (!Number.isFinite(a) || !Number.isFinite(b)) return 0;
+  return Math.max(0, (b - a) / 60000);
+}
+
+/** Portal auto-checkout when machine punch_out exists at/after 3 PM (no manual checkout). */
+function buildMachineAutoCheckoutStatus({ employeeId, todayLocal, machineCheckInIso, machineCheckOutIso, machine }) {
+  if (!machineCheckInIso || !machineCheckOutIso || !machine?.punchOut) return null;
+  if (!isPunchHmAtOrAfter3pm(machine.punchOut)) return null;
+  const totalMinutes = minutesBetweenIso(machineCheckInIso, machineCheckOutIso);
+  return {
+    status: 'checked-out',
+    checkInTime: null,
+    checkOutTime: machineCheckOutIso,
+    lastSessionCheckInTime: machineCheckInIso,
+    totalMinutes,
+    employeeId,
+    source: 'machine',
+    earliestPunchInTime: null,
+    machinePunchOutTime: machineCheckOutIso,
+    autoCheckoutFromMachine: true,
+  };
+}
+
 function employeeProfileFromDoc(emp) {
   if (!emp) {
     return { empCode: null, employeeName: 'Unknown', department: 'General' };
@@ -333,6 +368,19 @@ async function getTodayStatus({ employeeId, company, cache }) {
   // Machine punch (biometric/card) can exist even if user hasn't clicked manual check-in.
   const machine = await getMachinePunchForEmployee({ employeeId, company, dateYmd: todayLocal });
   const machineCheckInIso = machine?.punchIn ? timeHmToIso(todayLocal, machine.punchIn) : null;
+  const machineCheckOutIso = machine?.punchOut ? timeHmToIso(todayLocal, machine.punchOut) : null;
+
+  const machineAutoOut = buildMachineAutoCheckoutStatus({
+    employeeId,
+    todayLocal,
+    machineCheckInIso,
+    machineCheckOutIso,
+    machine,
+  });
+  if (machineAutoOut) {
+    if (cache) cache.map.set(cacheKey, { ts: nowTs, data: machineAutoOut });
+    return machineAutoOut;
+  }
 
   if (!mostRecentCheckIn) {
     if (machineCheckInIso) {
@@ -343,10 +391,13 @@ async function getTodayStatus({ employeeId, company, cache }) {
         status: 'checked-in',
         checkInTime: machineCheckInIso,
         checkOutTime: null,
+        lastSessionCheckInTime: null,
         totalMinutes: currentSessionMinutes,
         employeeId,
         source: 'machine',
         earliestPunchInTime: null,
+        machinePunchOutTime: machineCheckOutIso,
+        autoCheckoutFromMachine: false,
       };
       if (cache) cache.map.set(cacheKey, { ts: nowTs, data });
       return data;
@@ -355,9 +406,11 @@ async function getTodayStatus({ employeeId, company, cache }) {
       status: 'checked-out',
       checkInTime: null,
       checkOutTime: null,
+      lastSessionCheckInTime: null,
       totalMinutes: 0,
       employeeId,
       earliestPunchInTime: null,
+      machinePunchOutTime: machineCheckOutIso,
     };
     if (cache) cache.map.set(cacheKey, { ts: nowTs, data });
     return data;
@@ -410,17 +463,44 @@ async function getTodayStatus({ employeeId, company, cache }) {
     status = 'checked-out';
   }
 
+  const displayCheckInIso =
+    status === 'checked-out'
+      ? machineCheckInIso || mostRecentCheckIn?.checkInTime || null
+      : null;
+  const displayCheckOutIso =
+    status === 'checked-out'
+      ? machineCheckOutIso || mostRecentCheckIn.checkOutTime || null
+      : mostRecentCheckIn.checkOutTime || null;
+  let displayTotalMinutes = totalMinutes;
+  if (
+    status === 'checked-out' &&
+    displayCheckInIso &&
+    displayCheckOutIso &&
+    machineCheckInIso &&
+    machineCheckOutIso
+  ) {
+    displayTotalMinutes = minutesBetweenIso(machineCheckInIso, machineCheckOutIso);
+  }
+
   const data = {
     status,
     checkInTime: status === 'checked-in' ? sessionAnchorIso || null : null,
-    checkOutTime: mostRecentCheckIn.checkOutTime || null,
-    totalMinutes,
+    checkOutTime: displayCheckOutIso,
+    lastSessionCheckInTime:
+      status === 'checked-out'
+        ? displayCheckInIso || mostRecentCheckIn?.checkInTime || null
+        : null,
+    totalMinutes: displayTotalMinutes,
     employeeId,
     source,
     earliestPunchInTime:
       status === 'checked-in' && earliestPunchInIso && sessionAnchorIso && earliestPunchInIso !== sessionAnchorIso
         ? earliestPunchInIso
         : null,
+    machinePunchOutTime: machineCheckOutIso,
+    autoCheckoutFromMachine: Boolean(
+      machine?.punchOut && isPunchHmAtOrAfter3pm(machine.punchOut) && machineCheckInIso && machineCheckOutIso
+    ),
   };
 
   if (cache) cache.map.set(cacheKey, { ts: nowTs, data });
