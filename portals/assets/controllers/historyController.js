@@ -109,7 +109,8 @@ async function getHistory(req, res) {
   try {
     const companyId = req.query.companyId;
     const company = req.query.company;
-    const type = String(req.query.type || '').toLowerCase();
+    const typeRaw = String(req.query.type || '').toLowerCase();
+    const type = typeRaw === 'all' ? '' : typeRaw;
     const assetId = req.query.assetId;
     const assetTag = req.query.assetTag;
     const latestOnly = String(req.query.latestOnly) === 'true';

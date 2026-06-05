@@ -133,7 +133,7 @@ class SalaryCalculationService {
    * Attendance from `machine_attendance_reports` (same DBs/collections as attendance overview).
    * Paid / LOP are based on scheduled working days excluding **Saturday and Sunday** (weekends not counted as leave/LOP).
    */
-  async computeAttendanceLop({ company, employeeId, monthYear, empCodeFromProfile }) {
+  async computeAttendanceLop({ company, employeeId, monthYear, empCodeFromProfile, machineReportsPreloaded }) {
     const [yyyy, mm] = String(monthYear).split('-').map((x) => Number(x));
     if (!Number.isFinite(yyyy) || !Number.isFinite(mm) || mm < 1 || mm > 12) {
       throw new Error('Invalid monthYear. Expected "YYYY-MM".');
@@ -161,7 +161,7 @@ class SalaryCalculationService {
     const machineByDate = new Map();
 
     if (empCode && range) {
-      const machineReports = await getMachineAttendanceForRange(range);
+      const machineReports = machineReportsPreloaded || (await getMachineAttendanceForRange(range));
       for (const r of machineReports) {
         if (normalizeEmpCode(r.emp_code) !== empCode) continue;
         const dateKey = extractYyyyMmDdFromMachineDate(r.date);
@@ -312,12 +312,23 @@ class SalaryCalculationService {
     return this.roundMoney(Number(annualTax || 0) / m);
   }
 
-  async calculateEmployeePayroll({ company, employeeId, monthYear, annualCtc, structureRules, payrollProfile }) {
-    const settings = await loadPayrollCompanySettings(company).catch(() => ({
+  async calculateEmployeePayroll({
+    company,
+    employeeId,
+    monthYear,
+    annualCtc,
+    structureRules,
+    payrollProfile,
+    machineReportsPreloaded,
+    payrollSettingsPreloaded,
+  }) {
+    const settings =
+      payrollSettingsPreloaded ||
+      (await loadPayrollCompanySettings(company).catch(() => ({
       pfWageCeilingMonthly: 15000,
-      pfSlabsOld: [],
-      pfSlabsNew: [],
-    }));
+        pfSlabsOld: [],
+        pfSlabsNew: [],
+      })));
 
     const pfRule = String(payrollProfile?.pfRule || 'NEW').toUpperCase() === 'OLD' ? 'OLD' : 'NEW';
     const slabs = pfRule === 'OLD' ? settings.pfSlabsOld : settings.pfSlabsNew;
@@ -337,6 +348,7 @@ class SalaryCalculationService {
       employeeId,
       monthYear,
       empCodeFromProfile: payrollProfile?.emp_code,
+      machineReportsPreloaded,
     });
 
     const adj = await loadPayrollAttendanceAdjustment(company, employeeId, monthYear);

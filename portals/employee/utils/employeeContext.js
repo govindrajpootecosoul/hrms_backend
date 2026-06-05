@@ -7,7 +7,8 @@ function getCompanyFromRequest(req) {
 
 // Very small in-memory cache to reduce DB load for hot polling endpoints.
 const checkinStatusCache = new Map();
-const CHECKIN_STATUS_CACHE_TTL_MS = 1000;
+// 30s TTL — aligns with frontend status polling; cuts DB load without changing status semantics.
+const CHECKIN_STATUS_CACHE_TTL_MS = 30000;
 
 module.exports = {
   getCompanyFromRequest,

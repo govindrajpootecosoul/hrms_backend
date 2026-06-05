@@ -9,6 +9,9 @@ const { config, ports, getMongoUri, getBackendUrl: getAppBackendUrl } = require(
 const { networkConfig, backendPort } = require('./config/network.config');
 const { getCorsOptions } = require('./config/cors.config');
 const { subscribeAttendanceEvents } = require('./lib/attendanceEvents');
+const { initRedis } = require('./lib/responseCache');
+
+initRedis().catch(() => {});
 
 // Portals (see /portals/<name>/app.js — shared config/ and this server.js at repo root)
 const { authRoutes, adminUsersRoutes, adminWarehouseUsersRoutes } = require('./portals/admin-portal/app');

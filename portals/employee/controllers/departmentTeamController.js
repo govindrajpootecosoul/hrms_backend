@@ -1,5 +1,6 @@
 const { getCompanyFromRequest } = require('../utils/employeeContext');
 const { listDepartmentTeam } = require('../services/departmentTeamService');
+const responseCache = require('../../../lib/responseCache');
 
 async function getDepartmentTeam(req, res) {
   try {
@@ -9,7 +10,13 @@ async function getDepartmentTeam(req, res) {
     }
     const employeeId = req.query.employeeId;
     const userId = req.query.userId || null;
-    const data = await listDepartmentTeam({ company, employeeId, userId });
+    const cacheKey = `dept-team:${company}:${employeeId || ''}:${userId || ''}`;
+    const ttlMs = Number(process.env.DEPT_TEAM_CACHE_TTL_MS || 60000);
+
+    const data = responseCache.cacheEnabled()
+      ? await responseCache.wrap(cacheKey, ttlMs, () => listDepartmentTeam({ company, employeeId, userId }))
+      : await listDepartmentTeam({ company, employeeId, userId });
+
     return res.json({ success: true, data });
   } catch (err) {
     const code = err.statusCode || 500;

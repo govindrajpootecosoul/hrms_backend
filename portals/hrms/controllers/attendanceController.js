@@ -8,6 +8,7 @@ const {
   getEmployeeDbForHrms,
 } = require('../utils/hrmsContext');
 const { getDb, LOGIN_DB_NAME } = require('../../../config/mongo');
+const responseCache = require('../../../lib/responseCache');
 
 /** `dateRange` may be Date, object, or string — .split only exists on strings */
 function splitDateRangeParts(dateRange) {
@@ -121,6 +122,141 @@ function yyyyMmDdLocal(d) {
   const mm = String(d.getMonth() + 1).padStart(2, '0');
   const dd = String(d.getDate()).padStart(2, '0');
   return `${yyyy}-${mm}-${dd}`;
+}
+
+function extractYyyyMmDdFromMachineDate(dateVal) {
+  if (dateVal == null || dateVal === '') return null;
+  if (dateVal instanceof Date && !Number.isNaN(dateVal.getTime())) {
+    const y = dateVal.getUTCFullYear();
+    const m = String(dateVal.getUTCMonth() + 1).padStart(2, '0');
+    const d = String(dateVal.getUTCDate()).padStart(2, '0');
+    return `${y}-${m}-${d}`;
+  }
+  const s = String(dateVal);
+  const m = s.match(/^(\d{4}-\d{2}-\d{2})/);
+  return m ? m[1] : null;
+}
+
+function enumerateUtcDatesInRange(range) {
+  const dates = [];
+  const cur = new Date(range.start);
+  const end = new Date(range.end);
+  while (cur <= end) {
+    dates.push(
+      `${cur.getUTCFullYear()}-${String(cur.getUTCMonth() + 1).padStart(2, '0')}-${String(cur.getUTCDate()).padStart(2, '0')}`
+    );
+    cur.setUTCDate(cur.getUTCDate() + 1);
+  }
+  return dates;
+}
+
+/** Single HTTP call for weekly/monthly views — shared DB reads, same record shape as single-day. */
+async function listAttendanceForRange(req, res, range) {
+  try {
+    const companyName = requireCompany(req, res);
+    if (!companyName) return;
+    await connectMongo();
+
+    const dept = firstQueryValue(req.query.department, 'all');
+    const cacheKey = `attendance:range:${companyName}:${range.startDate}:${range.endDate}:${dept}`;
+    if (responseCache.cacheEnabled()) {
+      const cached = await responseCache.get(cacheKey);
+      if (cached) return res.json(cached);
+    }
+
+    const dates = enumerateUtcDatesInRange(range);
+    if (dates.length > 62) {
+      return res.status(400).json({ success: false, error: 'Date range too large (max 62 days)' });
+    }
+
+    const db = await getEmployeeDbForHrms(companyName);
+    const col = db.collection('employee_checkins');
+    const { getUsersCollection } = require('../../../config/mongo');
+    const usersCol = await getUsersCollection(null, companyName);
+    const allEmployees = await usersCol.find({ company: companyName }).toArray();
+
+    const employeeByEmpCode = new Map();
+    allEmployees.forEach((emp) => {
+      const ec = normalizeEmpCode(emp.emp_code);
+      if (ec) employeeByEmpCode.set(ec, true);
+    });
+
+    const allCheckIns = await col.find({ date: { $in: dates } }).sort({ checkInTime: -1 }).toArray();
+    const checkInsByDate = new Map();
+    for (const c of allCheckIns) {
+      const d = c.date;
+      if (!checkInsByDate.has(d)) checkInsByDate.set(d, []);
+      checkInsByDate.get(d).push(c);
+    }
+
+    const machineAll = await getMachineAttendanceForRange(range);
+    const machineByDate = new Map();
+    for (const r of machineAll) {
+      const empCode = normalizeEmpCode(r.emp_code);
+      if (!empCode || !employeeByEmpCode.has(empCode)) continue;
+      const dateKey = extractYyyyMmDdFromMachineDate(r.date);
+      if (!dateKey || !dates.includes(dateKey)) continue;
+      if (!machineByDate.has(dateKey)) machineByDate.set(dateKey, []);
+      machineByDate.get(dateKey).push(r);
+    }
+
+    const requestsCol = db.collection('attendance_requests');
+    const approvedLeaves = await requestsCol
+      .find({
+        type: 'time-off',
+        status: 'approved',
+        ...(companyName ? { company: companyName } : {}),
+      })
+      .toArray();
+    const wfhRequests = await requestsCol
+      .find({
+        type: { $in: ['wfh', 'WFH', 'work-from-home', 'work from home'] },
+        status: 'approved',
+        ...(companyName ? { company: companyName } : {}),
+      })
+      .toArray();
+
+    const allRecords = [];
+    for (const dateStr of dates) {
+      req.query.date = dateStr;
+      req._attendanceRangeDay = true;
+      req._attendancePrefetch = {
+        checkIns: checkInsByDate.get(dateStr) || [],
+        allEmployees,
+        machineReports: machineByDate.get(dateStr) || [],
+        approvedLeaves,
+        wfhRequests,
+      };
+      const dayRecords = await listAttendance(req, res);
+      if (!Array.isArray(dayRecords)) return;
+      allRecords.push(...dayRecords);
+    }
+
+    const rangeBody = {
+      success: true,
+      data: {
+        startDate: range.startDate,
+        endDate: range.endDate,
+        date: range.endDate,
+        records: allRecords,
+      },
+    };
+
+    if (responseCache.cacheEnabled()) {
+      const dept = firstQueryValue(req.query.department, 'all');
+      const cacheKey = `attendance:range:${companyName}:${range.startDate}:${range.endDate}:${dept}`;
+      await responseCache.set(cacheKey, rangeBody, Number(process.env.ATTENDANCE_CACHE_TTL_MS || 120000));
+    }
+
+    return res.json(rangeBody);
+  } catch (error) {
+    console.error('HRMS attendance range error:', error);
+    return res.status(500).json({
+      success: false,
+      error:
+        process.env.NODE_ENV === 'development' ? error.message || 'Internal server error' : 'Internal server error',
+    });
+  }
 }
 
 async function getMachineAttendanceForDay(dateStr) {
@@ -342,10 +478,20 @@ async function exportMachineAttendanceReports(req, res) {
 
 async function listAttendance(req, res) {
   try {
+    if (!req._attendanceRangeDay) {
+      const range = parseDateRangeFromQuery(req);
+      if (range) {
+        return listAttendanceForRange(req, res, range);
+      }
+    }
+
     const companyName = requireCompany(req, res);
     if (!companyName) return;
-    await connectMongo();
+    if (!req._attendanceRangeDay) {
+      await connectMongo();
+    }
 
+    const prefetch = req._attendancePrefetch || null;
     const date = firstQueryValue(req.query.date, new Date().toISOString().split('T')[0]);
     const department = firstQueryValue(req.query.department, 'all');
     
@@ -364,15 +510,14 @@ async function listAttendance(req, res) {
       // For now, we'll return all and filter on frontend if needed
     }
 
-    let checkIns = await col
-      .find(query)
-      .sort({ checkInTime: -1 })
-      .toArray();
-    
+    let checkIns = prefetch?.checkIns
+      ? prefetch.checkIns
+      : await col.find(query).sort({ checkInTime: -1 }).toArray();
+
     console.log(`[attendance] Found ${checkIns.length} check-ins for date: ${date} (company DB: ${companyName})`);
-    
+
     // If no results, try querying by checkInTime date range
-    if (checkIns.length === 0) {
+    if (!prefetch?.checkIns && checkIns.length === 0) {
       try {
         const todayDate = new Date(date);
         if (!isValidDate(todayDate)) {
@@ -397,7 +542,7 @@ async function listAttendance(req, res) {
     }
     
     // Get only this company's employees (employee_details lives in main_db)
-    const allEmployees = await usersCol.find({ company: companyName }).toArray();
+    const allEmployees = prefetch?.allEmployees || (await usersCol.find({ company: companyName }).toArray());
     const employeeByEmployeeId = new Map(); // employeeId/emailPrefix -> employee info
     const employeeByEmpCode = new Map(); // emp_code -> employee info
     allEmployees.forEach((emp) => {
@@ -416,7 +561,7 @@ async function listAttendance(req, res) {
     });
 
     // Machine attendance (main_db.machine_attendance_reports)
-    const machineReports = await getMachineAttendanceForDay(date);
+    const machineReports = prefetch?.machineReports || (await getMachineAttendanceForDay(date));
     const machineByEmpCode = new Map(); // emp_code -> best report
     for (const r of machineReports) {
       const empCode = normalizeEmpCode(r.emp_code);
@@ -612,13 +757,15 @@ async function listAttendance(req, res) {
 
       const todayDateStr = date;
       const onLeaveEmployees = new Set();
-      const approvedLeaves = await requestsCol
-        .find({
-          type: 'time-off',
-          status: 'approved',
-          ...(companyName ? { company: companyName } : {}),
-        })
-        .toArray();
+      const approvedLeaves =
+        prefetch?.approvedLeaves ||
+        (await requestsCol
+          .find({
+            type: 'time-off',
+            status: 'approved',
+            ...(companyName ? { company: companyName } : {}),
+          })
+          .toArray());
 
       approvedLeaves.forEach((leave) => {
         const parts = splitDateRangeParts(leave.dateRange);
@@ -660,13 +807,15 @@ async function listAttendance(req, res) {
       });
 
       const wfhFromRequests = new Set();
-      const wfhRequests = await requestsCol
-        .find({
-          type: { $in: ['wfh', 'WFH', 'work-from-home', 'work from home'] },
-          status: 'approved',
-          ...(companyName ? { company: companyName } : {}),
-        })
-        .toArray();
+      const wfhRequests =
+        prefetch?.wfhRequests ||
+        (await requestsCol
+          .find({
+            type: { $in: ['wfh', 'WFH', 'work-from-home', 'work from home'] },
+            status: 'approved',
+            ...(companyName ? { company: companyName } : {}),
+          })
+          .toArray());
 
       wfhRequests.forEach((wfhReq) => {
         const wfhParts = splitDateRangeParts(wfhReq.dateRange);
@@ -744,15 +893,20 @@ async function listAttendance(req, res) {
       console.warn('[attendance] Leave/WFH alignment skipped:', e.message);
     }
 
+    if (req._attendanceRangeDay) {
+      return attendanceRecords;
+    }
+
     res.json({
       success: true,
       data: {
         date,
-        records: attendanceRecords
-      }
+        records: attendanceRecords,
+      },
     });
   } catch (error) {
     console.error('HRMS attendance error:', error);
+    if (req._attendanceRangeDay) throw error;
     res.status(500).json({
       success: false,
       error:
@@ -770,6 +924,20 @@ async function attendanceStats(req, res) {
     const date = firstQueryValue(req.query.date, new Date().toISOString().split('T')[0]);
     const department = firstQueryValue(req.query.department, 'all');
     const payrollCompany = firstQueryValue(req.query.payrollCompany, null);
+
+    const statsCacheKey = `attendance:stats:${effectiveCompany}:${date}:${department}:${payrollCompany || 'all'}`;
+    if (responseCache.cacheEnabled()) {
+      const cached = await responseCache.get(statsCacheKey);
+      if (cached?.etag && cached?.body) {
+        res.setHeader('ETag', cached.etag);
+        res.setHeader('Cache-Control', 'no-cache');
+        res.setHeader('Vary', 'Origin, If-None-Match');
+        if (req.headers && req.headers['if-none-match'] === cached.etag) {
+          return res.status(304).end();
+        }
+        return res.json(cached.body);
+      }
+    }
     
     const db = await getEmployeeDbForHrms(effectiveCompany);
     let col = db.collection('employee_checkins');
@@ -1244,8 +1412,8 @@ async function attendanceStats(req, res) {
     if (req.headers && req.headers['if-none-match'] === etag) {
       return res.status(304).end();
     }
-    
-    res.json({
+
+    const statsBody = {
       success: true,
       data: {
         totalEmployees: totalEmployees || 0,
@@ -1256,9 +1424,19 @@ async function attendanceStats(req, res) {
         onLeaveToday: onLeaveCount,
         onWFHToday: onWFHCount,
         lateCheckIns,
-        leaveApprovals: pendingRequests
-      }
-    });
+        leaveApprovals: pendingRequests,
+      },
+    };
+
+    if (responseCache.cacheEnabled()) {
+      await responseCache.set(
+        statsCacheKey,
+        { etag, body: statsBody },
+        Number(process.env.ATTENDANCE_STATS_CACHE_TTL_MS || 60000)
+      );
+    }
+
+    return res.json(statsBody);
   } catch (error) {
     console.error('HRMS attendance stats error:', error);
     res.status(500).json({

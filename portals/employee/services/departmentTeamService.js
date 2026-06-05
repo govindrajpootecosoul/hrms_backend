@@ -92,7 +92,8 @@ async function listDepartmentTeam({ company, employeeId, userId }) {
     .filter((u) => String(u.employeeId || u.email || '').trim())
     .sort((a, b) => String(a.name || '').localeCompare(String(b.name || '')));
 
-  const cache = { map: checkinStatusCache, ttlMs: CHECKIN_STATUS_CACHE_TTL_MS };
+  // Department team refreshes every 60s — use a longer TTL than single-user status polls.
+  const cache = { map: checkinStatusCache, ttlMs: Math.max(CHECKIN_STATUS_CACHE_TTL_MS, 30000) };
   const members = await Promise.all(
     team.map(async (u) => {
       const eid = String(u.employeeId || '').trim() || String(u.email || '').trim();

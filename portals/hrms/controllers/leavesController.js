@@ -11,6 +11,7 @@ const {
   getEmployeeDbForHrms,
 } = require('../utils/hrmsContext');
 const { emitAttendanceChanged } = require('../../../lib/attendanceEvents');
+const { invalidateAttendanceCaches, invalidatePayrollCaches } = require('../../../lib/cacheInvalidation');
 
 const LEAVE_BALANCES_COLLECTION = 'leave_balances';
 const LEAVE_BALANCE_HISTORY_COLLECTION = 'leave_balance_history';
@@ -910,6 +911,10 @@ async function approveAttendanceRequest(req, res) {
     }
 
     emitAttendanceChanged({ company, type: 'attendance_request_approved', date: new Date().toISOString().slice(0, 10) });
+    invalidateAttendanceCaches(company).catch(() => {});
+    if (request.type === 'regularization') {
+      invalidatePayrollCaches(company).catch(() => {});
+    }
 
     res.json({
       success: true,

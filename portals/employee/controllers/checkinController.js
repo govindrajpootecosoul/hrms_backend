@@ -3,6 +3,7 @@ const { checkinStatusCache, CHECKIN_STATUS_CACHE_TTL_MS } = require('../utils/em
 const { checkinEmployee, checkoutEmployee, getTodayStatus, getHistory } = require('../services/checkinService');
 const { initializeCompanyPortals } = require('../../../config/mongo');
 const { emitAttendanceChanged } = require('../../../lib/attendanceEvents');
+const { invalidateAttendanceCaches } = require('../../../lib/cacheInvalidation');
 
 async function checkin(req, res) {
   try {
@@ -18,6 +19,7 @@ async function checkin(req, res) {
 
     const data = await checkinEmployee({ employeeId, company });
     emitAttendanceChanged({ company, type: 'checkin', date: new Date().toISOString().slice(0, 10) });
+    invalidateAttendanceCaches(company).catch(() => {});
     res.json({ success: true, message: 'Checked in successfully', data });
   } catch (err) {
     const code = err.statusCode || 500;
@@ -43,6 +45,7 @@ async function checkout(req, res) {
 
     const data = await checkoutEmployee({ employeeId, company });
     emitAttendanceChanged({ company, type: 'checkout', date: new Date().toISOString().slice(0, 10) });
+    invalidateAttendanceCaches(company).catch(() => {});
     res.json({ success: true, message: 'Checked out successfully', data });
   } catch (err) {
     const code = err.statusCode || 500;
