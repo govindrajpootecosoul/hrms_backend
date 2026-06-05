@@ -29,7 +29,7 @@ module.exports = {
     {
       name: 'HRMS-frontend',
       script: './start-server.js',
-      cwd: path.resolve(__dirname, '../worklytics_HRMS_frontend'),
+      cwd: path.resolve(__dirname, '../hrms_frontend'),
       instances: 1,
       exec_mode: 'fork',
       env_production: {
