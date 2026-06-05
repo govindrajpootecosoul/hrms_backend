@@ -601,8 +601,10 @@ async function createUser(req, res) {
     // Validation - All fields are now optional
     // Only validate format if values are provided
     
-    // Validate email format (only if email is provided)
-    if (email && email.trim() !== '') {
+    const isWarehouse = req?.usersCollectionType === 'warehouse';
+
+    // Validate email format (only if email is provided; warehouse staff may omit email)
+    if (email && email.trim() !== '' && !isWarehouse) {
       const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
       if (!emailRegex.test(email)) {
         return res.status(400).json({
@@ -868,30 +870,35 @@ async function updateUser(req, res) {
     // Basic fields
     if (name !== undefined) updateData.name = name.trim();
     if (email !== undefined) {
-      const normalizedEmail = email.toLowerCase().trim();
+      const normalizedEmail = String(email).toLowerCase().trim();
       const existingEmail = (existingUser.email || '').toLowerCase().trim();
+      const isWarehouse = req?.usersCollectionType === 'warehouse';
 
-      // Validate email format
-      const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-      if (!emailRegex.test(normalizedEmail)) {
-        return res.status(400).json({
-          success: false,
-          error: 'Invalid email format'
-        });
-      }
+      // Empty email is allowed (common for warehouse staff without portal login).
+      if (normalizedEmail !== '') {
+        // Regular employees: validate format when email is provided.
+        if (!isWarehouse) {
+          const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+          if (!emailRegex.test(normalizedEmail)) {
+            return res.status(400).json({
+              success: false,
+              error: 'Invalid email format'
+            });
+          }
+        }
 
-      // Only run duplicate check if email is actually changed.
-      // This avoids blocking password-only updates for the same user.
-      if (normalizedEmail !== existingEmail) {
-        const emailUser = await usersCol.findOne({ 
-          email: normalizedEmail,
-          _id: { $ne: new ObjectId(id) }
-        });
-        if (emailUser) {
-          return res.status(400).json({
-            success: false,
-            error: 'Email already taken by another user'
+        // Only run duplicate check if email is actually changed.
+        if (normalizedEmail !== existingEmail) {
+          const emailUser = await usersCol.findOne({
+            email: normalizedEmail,
+            _id: { $ne: new ObjectId(id) }
           });
+          if (emailUser) {
+            return res.status(400).json({
+              success: false,
+              error: 'Email already taken by another user'
+            });
+          }
         }
       }
 
@@ -911,13 +918,14 @@ async function updateUser(req, res) {
       updateData.isActive = active;
       if (active === false) {
         const exit = exitDate !== undefined ? String(exitDate).trim() : '';
-        if (!exit) {
+        const isWarehouse = req?.usersCollectionType === 'warehouse';
+        if (!exit && !isWarehouse) {
           return res.status(400).json({
             success: false,
             error: 'Exit date is required when marking an employee as inactive.'
           });
         }
-        updateData.exitDate = exit;
+        updateData.exitDate = exit || null;
       } else {
         updateData.exitDate = null;
       }
