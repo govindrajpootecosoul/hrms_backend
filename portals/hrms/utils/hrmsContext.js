@@ -22,6 +22,20 @@ function normalizeCompany(value) {
   return raw;
 }
 
+function escapeRe(s) {
+  return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/** Mongo filter for flexible company field matching on user/manager docs. */
+function companyQuery(company) {
+  const normalized = normalizeCompany(company);
+  if (!normalized) return {};
+  const lc = normalized.toLowerCase();
+  if (lc === 'thrive') return { company: { $regex: /^thrive$/i } };
+  if (lc.includes('ecosoul') || lc.includes('eco soul')) return { company: { $regex: /ecosoul/i } };
+  return { company: { $regex: new RegExp(`^${escapeRe(normalized)}$`, 'i') } };
+}
+
 /**
  * Require company for company-scoped routes. Sends 400 if missing.
  * @returns {string|null} Normalized company name or null (response already sent)
@@ -84,6 +98,8 @@ async function getEmployeeDbForHrms(company = null) {
 module.exports = {
   getCompanyFromRequest,
   normalizeCompany,
+  companyQuery,
+  escapeRe,
   requireCompany,
   RECRUITMENT_RECRUITER_NAMES,
   getHrmsDb,

@@ -886,6 +886,20 @@ async function approveAttendanceRequest(req, res) {
 
     console.log(`[hrms-portal] ✅ Attendance request ${requestId} approved by ${approvedBy || 'Admin'}`);
 
+    // Trigger notification to applicant employee
+    try {
+      const { triggerDecisionNotification } = require('../../employee/services/notificationService');
+      triggerDecisionNotification({
+        company,
+        requestDoc: request,
+        action: 'approve',
+        decidedByUserId: null,
+        decidedByName: approvedBy || 'HR/Admin'
+      }).catch(err => console.error('[approveAttendanceRequest] Notification trigger failed:', err));
+    } catch (notifErr) {
+      console.error('[approveAttendanceRequest] Failed to load Notification Service:', notifErr);
+    }
+
     // If this is an attendance regularization request, apply it to machine attendance reports.
     if (request.type === 'regularization' && request.date && request.timeWindow) {
       try {
@@ -986,6 +1000,20 @@ async function rejectAttendanceRequest(req, res) {
     }
 
     console.log(`[hrms-portal] Attendance request ${requestId} rejected by ${rejectedBy || 'Admin'}`);
+
+    // Trigger notification to applicant employee
+    try {
+      const { triggerDecisionNotification } = require('../../employee/services/notificationService');
+      triggerDecisionNotification({
+        company,
+        requestDoc: request,
+        action: 'reject',
+        decidedByUserId: null,
+        decidedByName: rejectedBy || 'HR/Admin'
+      }).catch(err => console.error('[rejectAttendanceRequest] Notification trigger failed:', err));
+    } catch (notifErr) {
+      console.error('[rejectAttendanceRequest] Failed to load Notification Service:', notifErr);
+    }
     emitAttendanceChanged({ company, type: 'attendance_request_rejected', date: new Date().toISOString().slice(0, 10) });
 
     res.json({
@@ -1204,6 +1232,19 @@ async function createAttendanceRequest(req, res) {
     Object.keys(doc).forEach((k) => doc[k] === undefined && delete doc[k]);
 
     const result = await col.insertOne(doc);
+
+    // Trigger notification to managers and HR
+    try {
+      const { triggerRequestNotification } = require('../../employee/services/notificationService');
+      triggerRequestNotification({
+        company,
+        requestDoc: { ...doc, _id: result.insertedId },
+        requestId: result.insertedId
+      }).catch(err => console.error('[createAttendanceRequest] Notification trigger failed:', err));
+    } catch (notifErr) {
+      console.error('[createAttendanceRequest] Failed to load Notification Service:', notifErr);
+    }
+
     emitAttendanceChanged({ company, type: 'attendance_request_created', date: normalizedFrom });
 
     res.json({

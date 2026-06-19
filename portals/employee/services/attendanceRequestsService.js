@@ -2,6 +2,7 @@ const { getDb, getEmployeePortalDb, getUsersCollection, LOGIN_DB_NAME } = requir
 const { ATTENDANCE_REQUESTS } = require('../models');
 const { emitAttendanceChanged } = require('../../../lib/attendanceEvents');
 const { ObjectId } = require('mongodb');
+const { normalizeCompany, companyQuery } = require('../../hrms/utils/hrmsContext');
 
 const DEPARTMENT_MANAGERS_COLLECTION = 'department_managers';
 
@@ -49,13 +50,13 @@ async function fetchEmployeeProfileForRequest({ employeeId, company }) {
 }
 
 async function getManagerScope({ userId, company }) {
-  const normalizedCompany = String(company || '').trim();
+  const normalizedCompany = normalizeCompany(company);
   const uid = String(userId || '').trim();
   if (!normalizedCompany || !uid) return { isManager: false, departments: [] };
 
   const col = await getDepartmentManagersCollection();
   const rows = await col
-    .find({ company: normalizedCompany, managerUserIds: uid }, { projection: { department: 1, _id: 0 } })
+    .find({ ...companyQuery(normalizedCompany), managerUserIds: uid }, { projection: { department: 1, _id: 0 } })
     .toArray();
   const departments = Array.from(new Set(rows.map((r) => normalizeDept(r.department)).filter(Boolean))).sort();
   return { isManager: departments.length > 0, departments };
@@ -220,6 +221,19 @@ async function submitRequest({ employeeId, company, body }) {
   };
 
   const result = await col.insertOne(requestDoc);
+  
+  // Trigger notification to managers and HR
+  try {
+    const { triggerRequestNotification } = require('./notificationService');
+    triggerRequestNotification({
+      company,
+      requestDoc: { ...requestDoc, type },
+      requestId: result.insertedId
+    }).catch(err => console.error('[submitRequest] Notification trigger failed:', err));
+  } catch (notifErr) {
+    console.error('[submitRequest] Failed to load Notification Service:', notifErr);
+  }
+
   // Attendance requests can affect dashboard stats once approved (and are visible in pending counts).
   emitAttendanceChanged({ company, type: 'attendance_request_submitted', date: (date || new Date().toISOString().slice(0, 10)) });
   return { requestId: result.insertedId, type, status: 'pending' };
@@ -378,7 +392,7 @@ async function decideRequest({ requestId, company, action, decidedByUserId, deci
   const now = new Date();
 
   // Authorization: ensure this user is a manager for this request's department
-  const existing = await col.findOne({ _id }, { projection: { employeeDepartment: 1, employeeDepartmentNormalized: 1, status: 1 } });
+  const existing = await col.findOne({ _id });
   if (!existing) {
     const err = new Error('Request not found');
     err.statusCode = 404;
@@ -429,6 +443,20 @@ async function decideRequest({ requestId, company, action, decidedByUserId, deci
     const err = new Error('This request was already processed by someone else.');
     err.statusCode = 409;
     throw err;
+  }
+
+  // Trigger notification to applicant employee
+  try {
+    const { triggerDecisionNotification } = require('./notificationService');
+    triggerDecisionNotification({
+      company,
+      requestDoc: existing,
+      action: act,
+      decidedByUserId,
+      decidedByName
+    }).catch(err => console.error('[decideRequest] Notification trigger failed:', err));
+  } catch (notifErr) {
+    console.error('[decideRequest] Failed to load Notification Service:', notifErr);
   }
 
   emitAttendanceChanged({ company, type: `attendance_request_${act}d_by_manager`, date: new Date().toISOString().slice(0, 10) });

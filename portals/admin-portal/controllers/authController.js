@@ -1,10 +1,22 @@
-const express = require('express');
-const router = express.Router();
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const { ObjectId } = require('mongodb');
 const { connectMongo, getUsersCollection, LOGIN_DB_NAME, initializeCompanyPortals } = require('../../../config/mongo');
 const { config } = require('../../../config/app.config');
+const { isGraphMailConfigured, sendMail } = require('../../../lib/microsoftGraphMail');
+const {
+  normalizeEmail,
+  createAndStoreOtp,
+  verifyOtpAndConsume,
+  OTP_TTL_MS,
+} = require('../../../lib/passwordResetOtp');
+
+const ALLOWED_EMAIL_DOMAINS = ['@thrivebrands.ai', '@ecosoulhome.com'];
+
+function isAllowedLoginEmail(email) {
+  const emailLower = String(email || '').trim().toLowerCase();
+  return ALLOWED_EMAIL_DOMAINS.some((domain) => emailLower.endsWith(domain));
+}
 
 // Signup endpoint
 
@@ -130,9 +142,7 @@ async function login(req, res) {
       });
     }
 
-    // Validate email domain
-    const emailLower = email.toLowerCase();
-    if (!emailLower.endsWith('@thrivebrands.ai') && !emailLower.endsWith('@ecosoulhome.com')) {
+    if (!isAllowedLoginEmail(email)) {
       return res.status(400).json({
         success: false,
         error: 'Invalid email domain. Email must end with @thrivebrands.ai or @ecosoulhome.com'
@@ -306,4 +316,141 @@ async function verify(req, res) {
   }
 }
 
-module.exports = { signup, login, verify };
+async function forgotPassword(req, res) {
+  try {
+    const { email } = req.body;
+
+    if (!email) {
+      return res.status(400).json({ success: false, error: 'Email is required' });
+    }
+
+    if (!isAllowedLoginEmail(email)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid email domain. Email must end with @thrivebrands.ai or @ecosoulhome.com',
+      });
+    }
+
+    if (!isGraphMailConfigured()) {
+      return res.status(503).json({
+        success: false,
+        error: 'Password reset email is not configured. Please contact your administrator.',
+      });
+    }
+
+    const normalized = normalizeEmail(email);
+    await connectMongo(LOGIN_DB_NAME);
+    const usersCol = await getUsersCollection();
+    const user = await usersCol.findOne({
+      email: { $regex: new RegExp(`^${normalized.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') },
+    });
+
+    // Always return the same message to avoid email enumeration
+    const genericSuccess = {
+      success: true,
+      message: 'If an account exists for this email, an OTP has been sent.',
+    };
+
+    if (!user || user.isActive === false) {
+      return res.json(genericSuccess);
+    }
+
+    const { otp } = await createAndStoreOtp(normalized);
+    const expiryMinutes = Math.round(OTP_TTL_MS / 60000);
+
+    await sendMail({
+      to: user.email,
+      subject: 'Vectorlytics Portal — Password reset OTP',
+      html: `
+        <p>Hello${user.name ? ` ${user.name}` : ''},</p>
+        <p>Your one-time password (OTP) to reset your Vectorlytics Portal password is:</p>
+        <p style="font-size:24px;font-weight:bold;letter-spacing:4px;">${otp}</p>
+        <p>This OTP expires in ${expiryMinutes} minutes. If you did not request this, you can ignore this email.</p>
+        <p>— Vectorlytics Portal</p>
+      `,
+    });
+
+    return res.json(genericSuccess);
+  } catch (error) {
+    console.error('[forgotPassword]', error);
+    const status = error.statusCode || 500;
+    return res.status(status).json({
+      success: false,
+      error: error.message || 'Failed to send password reset OTP',
+    });
+  }
+}
+
+async function resetPassword(req, res) {
+  try {
+    const { email, otp, password, confirmPassword } = req.body;
+
+    if (!email || !otp || !password) {
+      return res.status(400).json({
+        success: false,
+        error: 'Email, OTP, and new password are required',
+      });
+    }
+
+    if (!isAllowedLoginEmail(email)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid email domain. Email must end with @thrivebrands.ai or @ecosoulhome.com',
+      });
+    }
+
+    if (password.length < 6) {
+      return res.status(400).json({
+        success: false,
+        error: 'Password must be at least 6 characters long',
+      });
+    }
+
+    if (confirmPassword !== undefined && password !== confirmPassword) {
+      return res.status(400).json({
+        success: false,
+        error: 'Passwords do not match',
+      });
+    }
+
+    const normalized = normalizeEmail(email);
+    await verifyOtpAndConsume(normalized, String(otp).trim());
+
+    await connectMongo(LOGIN_DB_NAME);
+    const usersCol = await getUsersCollection();
+    const user = await usersCol.findOne({
+      email: { $regex: new RegExp(`^${normalized.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') },
+    });
+
+    if (!user) {
+      return res.status(400).json({ success: false, error: 'User not found' });
+    }
+
+    if (user.isActive === false) {
+      return res.status(403).json({
+        success: false,
+        error: 'Your account has been deactivated. Please contact your administrator.',
+      });
+    }
+
+    const hashedPassword = await bcrypt.hash(password, 10);
+    await usersCol.updateOne(
+      { _id: user._id },
+      { $set: { password: hashedPassword, updatedAt: new Date() } }
+    );
+
+    return res.json({
+      success: true,
+      message: 'Password updated successfully. You can now sign in with your new password.',
+    });
+  } catch (error) {
+    console.error('[resetPassword]', error);
+    const status = error.statusCode || 500;
+    return res.status(status).json({
+      success: false,
+      error: error.message || 'Failed to reset password',
+    });
+  }
+}
+
+module.exports = { signup, login, verify, forgotPassword, resetPassword };

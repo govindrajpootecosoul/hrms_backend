@@ -5,5 +5,6 @@ router.use(require('./portalData.routes'));
 router.use(require('./checkin.routes'));
 router.use(require('./attendanceRequests.routes'));
 router.use(require('./machineAttendance.routes'));
+router.use(require('./notifications.routes'));
 
 module.exports = router;

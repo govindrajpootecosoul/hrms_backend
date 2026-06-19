@@ -32,6 +32,7 @@ const PORTAL_CONFIG = {
       'portal_reports',
       'attendance_requests',
       'employee_checkins',
+      'notifications',
     ],
   },
   'query-tracker': {
