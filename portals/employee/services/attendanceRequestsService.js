@@ -23,21 +23,26 @@ function normalizeDept(v) {
 async function fetchEmployeeProfileForRequest({ employeeId, company }) {
   try {
     const usersCol = await getUsersCollection(null, company);
-    // Find by employeeId (most reliable). Fallback: email prefix match.
     const escapeRe = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     const empId = String(employeeId || '').trim();
     if (!empId) return null;
-    const doc = await usersCol.findOne(
-      {
-        company,
-        $or: [
-          { employeeId: empId },
-          { employeeId: new RegExp(`^${escapeRe(empId)}$`, 'i') },
-          { email: new RegExp(`^${escapeRe(empId)}(@|$)`, 'i') },
-        ],
-      },
-      { projection: { name: 1, email: 1, employeeId: 1, department: 1 } }
-    );
+
+    const idQuery = {
+      $or: [
+        { employeeId: empId },
+        { employeeId: new RegExp(`^${escapeRe(empId)}$`, 'i') },
+        { email: new RegExp(`^${escapeRe(empId)}(@|$)`, 'i') },
+      ],
+    };
+
+    let doc = await usersCol.findOne({ ...companyQuery(company), ...idQuery }, {
+      projection: { name: 1, email: 1, employeeId: 1, department: 1 },
+    });
+    if (!doc) {
+      doc = await usersCol.findOne(idQuery, {
+        projection: { name: 1, email: 1, employeeId: 1, department: 1 },
+      });
+    }
     if (!doc) return null;
     return {
       employeeName: doc.name || '',
@@ -55,8 +60,12 @@ async function getManagerScope({ userId, company }) {
   if (!normalizedCompany || !uid) return { isManager: false, departments: [] };
 
   const col = await getDepartmentManagersCollection();
+  const managerMatch = ObjectId.isValid(uid)
+    ? { $or: [{ managerUserIds: uid }, { managerUserIds: new ObjectId(uid) }] }
+    : { managerUserIds: uid };
+
   const rows = await col
-    .find({ ...companyQuery(normalizedCompany), managerUserIds: uid }, { projection: { department: 1, _id: 0 } })
+    .find({ ...companyQuery(normalizedCompany), ...managerMatch }, { projection: { department: 1, _id: 0 } })
     .toArray();
   const departments = Array.from(new Set(rows.map((r) => normalizeDept(r.department)).filter(Boolean))).sort();
   return { isManager: departments.length > 0, departments };
@@ -221,17 +230,17 @@ async function submitRequest({ employeeId, company, body }) {
   };
 
   const result = await col.insertOne(requestDoc);
-  
-  // Trigger notification to managers and HR
+
+  // Trigger notification to managers / HRMS admin
   try {
     const { triggerRequestNotification } = require('./notificationService');
-    triggerRequestNotification({
+    await triggerRequestNotification({
       company,
       requestDoc: { ...requestDoc, type },
-      requestId: result.insertedId
-    }).catch(err => console.error('[submitRequest] Notification trigger failed:', err));
+      requestId: result.insertedId,
+    });
   } catch (notifErr) {
-    console.error('[submitRequest] Failed to load Notification Service:', notifErr);
+    console.error('[submitRequest] Notification trigger failed:', notifErr);
   }
 
   // Attendance requests can affect dashboard stats once approved (and are visible in pending counts).
@@ -413,13 +422,17 @@ async function decideRequest({ requestId, company, action, decidedByUserId, deci
     throw err;
   }
 
+  const { resolveActorByUserId } = require('./approverResolver');
+  const actor = await resolveActorByUserId(decidedByUserId, decidedByName, 'manager');
+  const displayName = actor.name;
+
   const update =
     act === 'approve'
       ? {
           $set: {
             status: 'approved',
             approvedAt: now,
-            approvedBy: decidedByName || decidedByUserId,
+            approvedBy: displayName,
             approvedByUserId: String(decidedByUserId),
             approvedByRole: 'manager',
             updatedAt: now,
@@ -429,7 +442,7 @@ async function decideRequest({ requestId, company, action, decidedByUserId, deci
           $set: {
             status: 'rejected',
             rejectedAt: now,
-            rejectedBy: decidedByName || decidedByUserId,
+            rejectedBy: displayName,
             rejectedByUserId: String(decidedByUserId),
             rejectedByRole: 'manager',
             rejectionReason: String(reason || '').trim(),
@@ -448,13 +461,14 @@ async function decideRequest({ requestId, company, action, decidedByUserId, deci
   // Trigger notification to applicant employee
   try {
     const { triggerDecisionNotification } = require('./notificationService');
-    triggerDecisionNotification({
+    await triggerDecisionNotification({
       company,
       requestDoc: existing,
       action: act,
       decidedByUserId,
-      decidedByName
-    }).catch(err => console.error('[decideRequest] Notification trigger failed:', err));
+      decidedByName: displayName,
+      approverRole: 'manager',
+    });
   } catch (notifErr) {
     console.error('[decideRequest] Failed to load Notification Service:', notifErr);
   }

@@ -8,13 +8,16 @@ function resolveCompany(req) {
 
 async function listUserNotifications(req, res) {
   try {
-    const company = resolveCompany(req);
+    let company = resolveCompany(req);
+    if (!company && req.auth?.company) {
+      company = normalizeCompany(req.auth.company);
+    }
     if (!company) {
       return res.status(400).json({ success: false, error: 'company is required' });
     }
     
     // We expect req.auth to be set by requireAuth middleware
-    const recipientId = req.auth?.userId;
+    const recipientId = req.auth?.userId || req.auth?.id;
     if (!recipientId) {
       return res.status(401).json({ success: false, error: 'Unauthorized: missing user details' });
     }
@@ -53,7 +56,7 @@ async function markNotificationAsRead(req, res) {
       return res.status(400).json({ success: false, error: 'company is required' });
     }
 
-    const recipientId = req.auth?.userId;
+    const recipientId = req.auth?.userId || req.auth?.id;
     if (!recipientId) {
       return res.status(401).json({ success: false, error: 'Unauthorized: missing user details' });
     }
@@ -81,7 +84,7 @@ async function markAllNotificationsAsRead(req, res) {
       return res.status(400).json({ success: false, error: 'company is required' });
     }
 
-    const recipientId = req.auth?.userId;
+    const recipientId = req.auth?.userId || req.auth?.id;
     if (!recipientId) {
       return res.status(401).json({ success: false, error: 'Unauthorized: missing user details' });
     }

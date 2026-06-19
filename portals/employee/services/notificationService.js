@@ -3,19 +3,50 @@ const { ObjectId } = require('mongodb');
 const { normalizeCompany, companyQuery, escapeRe } = require('../../hrms/utils/hrmsContext');
 
 const DEPARTMENT_MANAGERS_COLLECTION = 'department_managers';
+const NOTIFICATIONS_COLLECTION = 'portal_notifications';
 
 async function getDepartmentManagersCollection() {
   const db = await getDb(LOGIN_DB_NAME);
   return db.collection(DEPARTMENT_MANAGERS_COLLECTION);
 }
 
+async function getNotificationsCollection() {
+  const db = await getDb(LOGIN_DB_NAME);
+  return db.collection(NOTIFICATIONS_COLLECTION);
+}
+
 function normalizeDept(v) {
   return String(v || '').trim();
 }
 
+function normalizeDeptKey(v) {
+  return normalizeDept(v).toLowerCase();
+}
+
 function isHrDepartment(dept) {
-  const d = normalizeDept(dept).toLowerCase();
+  const d = normalizeDeptKey(dept);
   return d === 'hr' || d === 'human resources' || d.startsWith('hr ') || d.includes('human resource');
+}
+
+function companyFilterForNotifications(company) {
+  const normalized = normalizeCompany(company);
+  if (!normalized) return {};
+  const lc = normalized.toLowerCase();
+  if (lc === 'thrive') return { company: { $regex: /^thrive$/i } };
+  if (lc.includes('ecosoul') || lc.includes('eco soul')) return { company: { $regex: /ecosoul/i } };
+  return { company: { $regex: new RegExp(`^${escapeRe(normalized)}$`, 'i') } };
+}
+
+function employeeIdQuery(employeeId) {
+  const empId = String(employeeId || '').trim();
+  if (!empId) return null;
+  return {
+    $or: [
+      { employeeId: empId },
+      { employeeId: new RegExp(`^${escapeRe(empId)}$`, 'i') },
+      { email: new RegExp(`^${escapeRe(empId)}(@|$)`, 'i') },
+    ],
+  };
 }
 
 function getTitleForRequest(requestDoc) {
@@ -45,10 +76,15 @@ function getMessageForRequest(requestDoc, applicantName) {
   return `${name} has submitted an attendance/leave request.`;
 }
 
-function getDecisionMessage(requestDoc, action, decidedByName) {
+function getDecisionMessage(requestDoc, action, decidedByName, approverRole) {
   const type = requestDoc.type;
   const act = action === 'approve' ? 'approved' : 'rejected';
-  const decBy = decidedByName || 'Manager/HR';
+  const name = String(decidedByName || '').trim();
+  const role = String(approverRole || '').toLowerCase();
+  let decBy = name || 'Manager/HR';
+  if (!name) {
+    decBy = role === 'hr' ? 'HR' : 'Department Manager';
+  }
   if (type === 'time-off') {
     if (requestDoc.leaveType === 'Work From Home') {
       return `Your Work From Home request has been ${act} by ${decBy}.`;
@@ -61,30 +97,26 @@ function getDecisionMessage(requestDoc, action, decidedByName) {
 }
 
 async function findApplicant(usersCol, company, employeeId) {
-  const empId = String(employeeId || '').trim();
-  if (!empId) return null;
-  return usersCol.findOne({
-    ...companyQuery(company),
-    $or: [
-      { employeeId: empId },
-      { employeeId: new RegExp(`^${escapeRe(empId)}$`, 'i') },
-      { email: new RegExp(`^${escapeRe(empId)}(@|$)`, 'i') },
-    ],
-  });
+  const idQuery = employeeIdQuery(employeeId);
+  if (!idQuery) return null;
+
+  let applicant = await usersCol.findOne({ ...companyQuery(company), ...idQuery });
+  if (!applicant) {
+    applicant = await usersCol.findOne(idQuery);
+  }
+  return applicant;
 }
 
 async function findDepartmentManagerUserIds(company, department) {
-  const dept = normalizeDept(department);
-  if (!dept) return [];
+  const deptKey = normalizeDeptKey(department);
+  if (!deptKey) return [];
 
   const managersCol = await getDepartmentManagersCollection();
-  const docs = await managersCol.find({
-    ...companyQuery(company),
-    department: { $regex: new RegExp(`^${escapeRe(dept)}$`, 'i') },
-  }).toArray();
+  const docs = await managersCol.find({ ...companyQuery(company) }).toArray();
 
   const ids = [];
   for (const doc of docs) {
+    if (normalizeDeptKey(doc?.department) !== deptKey) continue;
     if (Array.isArray(doc.managerUserIds)) {
       ids.push(...doc.managerUserIds.map((id) => String(id)));
     } else if (doc.managerUserId) {
@@ -114,14 +146,15 @@ async function findHrmsAdminUserIds(usersCol, company) {
 }
 
 /**
- * Creates a notification in the company-specific database.
+ * Creates a notification in the login DB (single source of truth).
  */
 async function createNotification({ company, recipientId, senderId, senderName, title, message, type, referenceId, audience }) {
   if (!company || !recipientId) return null;
   try {
-    const db = await getEmployeePortalDb(company);
-    const col = db.collection('notifications');
+    const col = await getNotificationsCollection();
+    const normalizedCompany = normalizeCompany(company);
     const doc = {
+      company: normalizedCompany,
       recipientId: String(recipientId),
       senderId: senderId ? String(senderId) : null,
       senderName: senderName || null,
@@ -149,30 +182,40 @@ async function triggerRequestNotification({ company, requestDoc, requestId }) {
   try {
     if (!company || !requestDoc) return;
     const usersCol = await getUsersCollection();
+    const normalizedCompany = normalizeCompany(company);
 
-    const applicant = await findApplicant(usersCol, company, requestDoc.employeeId);
+    const applicant = await findApplicant(usersCol, normalizedCompany, requestDoc.employeeId);
     const applicantUserId = applicant?._id?.toString() || null;
     const applicantDept = normalizeDept(applicant?.department || requestDoc.employeeDepartment);
 
     if (!applicantDept) {
-      console.warn(`[NotificationService] No department found for employee: ${requestDoc.employeeId}. Cannot target managers.`);
+      console.warn(
+        `[NotificationService] No department for employee ${requestDoc.employeeId} (company: ${normalizedCompany}). Assign department on user profile.`
+      );
     }
 
     const managerUserIds = applicantDept
-      ? await findDepartmentManagerUserIds(company, applicantDept)
+      ? await findDepartmentManagerUserIds(normalizedCompany, applicantDept)
       : [];
 
     let recipientIds = [...managerUserIds];
 
     if (isHrDepartment(applicantDept)) {
-      const hrmsAdminIds = await findHrmsAdminUserIds(usersCol, company);
+      const hrmsAdminIds = await findHrmsAdminUserIds(usersCol, normalizedCompany);
       recipientIds = Array.from(new Set([...recipientIds, ...hrmsAdminIds]));
     }
 
     recipientIds = Array.from(new Set(recipientIds)).filter((id) => id && id !== applicantUserId);
 
+    if (!recipientIds.length) {
+      console.warn(
+        `[NotificationService] No recipients for request ${requestId}. dept="${applicantDept || ''}", managersConfigured=${managerUserIds.length}, company="${normalizedCompany}"`
+      );
+      return;
+    }
+
     console.log(
-      `[NotificationService] Sending notification to ${recipientIds.length} recipients for request ${requestId} (dept: ${applicantDept || 'unknown'}, hrDept: ${isHrDepartment(applicantDept)})`
+      `[NotificationService] Sending notification to ${recipientIds.length} recipients for request ${requestId} (dept: ${applicantDept || 'unknown'})`
     );
 
     const title = getTitleForRequest(requestDoc);
@@ -187,7 +230,7 @@ async function triggerRequestNotification({ company, requestDoc, requestId }) {
         ['admin', 'superadmin'].includes(String(recipientUser?.role || '').toLowerCase());
 
       await createNotification({
-        company,
+        company: normalizedCompany,
         recipientId,
         senderId: applicantUserId,
         senderName: applicant?.name || requestDoc.employeeName || 'Employee',
@@ -209,26 +252,25 @@ async function triggerRequestNotification({ company, requestDoc, requestId }) {
 /**
  * Triggers a notification to the applicant when their request is approved/rejected.
  */
-async function triggerDecisionNotification({ company, requestDoc, action, decidedByUserId, decidedByName }) {
+async function triggerDecisionNotification({ company, requestDoc, action, decidedByUserId, decidedByName, approverRole }) {
   try {
     if (!company || !requestDoc) return;
     const usersCol = await getUsersCollection();
+    const normalizedCompany = normalizeCompany(company);
 
-    const applicant = await findApplicant(usersCol, company, requestDoc.employeeId);
+    const applicant = await findApplicant(usersCol, normalizedCompany, requestDoc.employeeId);
     const applicantUserId = applicant?._id?.toString() || null;
 
     if (!applicantUserId) {
-      console.warn(`[NotificationService] No user record found for employeeId: ${requestDoc.employeeId} in company: ${company}`);
+      console.warn(`[NotificationService] No user record found for employeeId: ${requestDoc.employeeId} in company: ${normalizedCompany}`);
       return;
     }
 
     const title = `Request ${action === 'approve' ? 'Approved' : 'Rejected'}`;
-    const message = getDecisionMessage(requestDoc, action, decidedByName);
-
-    console.log(`[NotificationService] Sending decision notification to applicant user: ${applicantUserId} (employeeId: ${requestDoc.employeeId})`);
+    const message = getDecisionMessage(requestDoc, action, decidedByName, approverRole);
 
     await createNotification({
-      company,
+      company: normalizedCompany,
       recipientId: applicantUserId,
       senderId: decidedByUserId || null,
       senderName: decidedByName || 'Manager/HR',
@@ -243,32 +285,73 @@ async function triggerDecisionNotification({ company, requestDoc, action, decide
   }
 }
 
+async function readLegacyNotifications(company, recipientId) {
+  try {
+    const db = await getEmployeePortalDb(company);
+    return db.collection('notifications').find({ recipientId: String(recipientId) }).sort({ createdAt: -1 }).toArray();
+  } catch {
+    return [];
+  }
+}
+
 /**
  * Fetch all notifications for a given user.
  */
 async function listNotifications({ company, recipientId }) {
-  if (!company || !recipientId) return [];
-  const db = await getEmployeePortalDb(company);
-  const col = db.collection('notifications');
-  return col.find({ recipientId: String(recipientId) }).sort({ createdAt: -1 }).toArray();
+  if (!recipientId) return [];
+  const normalizedCompany = normalizeCompany(company);
+  const rid = String(recipientId);
+
+  const col = await getNotificationsCollection();
+  const primaryQuery = {
+    recipientId: rid,
+    ...(normalizedCompany ? companyFilterForNotifications(normalizedCompany) : {}),
+  };
+
+  let results = await col.find(primaryQuery).sort({ createdAt: -1 }).toArray();
+
+  if (!results.length && normalizedCompany) {
+    const legacy = await readLegacyNotifications(normalizedCompany, rid);
+    if (legacy.length) results = legacy;
+  }
+
+  return results;
 }
 
 /**
  * Mark a single notification as read.
  */
 async function markAsRead({ company, recipientId, notificationId }) {
-  if (!company || !recipientId || !notificationId) return false;
-  const db = await getEmployeePortalDb(company);
-  const col = db.collection('notifications');
+  if (!recipientId || !notificationId) return false;
+  const col = await getNotificationsCollection();
+  const normalizedCompany = normalizeCompany(company);
+  const rid = String(recipientId);
 
   const query = {
     _id: ObjectId.isValid(notificationId) ? new ObjectId(notificationId) : notificationId,
-    recipientId: String(recipientId),
+    recipientId: rid,
+    ...(normalizedCompany ? companyFilterForNotifications(normalizedCompany) : {}),
   };
 
-  const result = await col.updateOne(query, {
+  let result = await col.updateOne(query, {
     $set: { isRead: true, updatedAt: new Date() },
   });
+
+  if (!result.modifiedCount && normalizedCompany) {
+    try {
+      const legacyDb = await getEmployeePortalDb(normalizedCompany);
+      result = await legacyDb.collection('notifications').updateOne(
+        {
+          _id: ObjectId.isValid(notificationId) ? new ObjectId(notificationId) : notificationId,
+          recipientId: rid,
+        },
+        { $set: { isRead: true, updatedAt: new Date() } }
+      );
+    } catch {
+      // ignore
+    }
+  }
+
   return result.modifiedCount > 0;
 }
 
@@ -276,14 +359,32 @@ async function markAsRead({ company, recipientId, notificationId }) {
  * Mark all notifications for a recipient as read.
  */
 async function markAllAsRead({ company, recipientId }) {
-  if (!company || !recipientId) return false;
-  const db = await getEmployeePortalDb(company);
-  const col = db.collection('notifications');
+  if (!recipientId) return false;
+  const col = await getNotificationsCollection();
+  const normalizedCompany = normalizeCompany(company);
+  const rid = String(recipientId);
+  const filter = {
+    recipientId: rid,
+    isRead: false,
+    ...(normalizedCompany ? companyFilterForNotifications(normalizedCompany) : {}),
+  };
 
-  const result = await col.updateMany(
-    { recipientId: String(recipientId), isRead: false },
-    { $set: { isRead: true, updatedAt: new Date() } }
-  );
+  const result = await col.updateMany(filter, {
+    $set: { isRead: true, updatedAt: new Date() },
+  });
+
+  if (normalizedCompany) {
+    try {
+      const legacyDb = await getEmployeePortalDb(normalizedCompany);
+      await legacyDb.collection('notifications').updateMany(
+        { recipientId: rid, isRead: false },
+        { $set: { isRead: true, updatedAt: new Date() } }
+      );
+    } catch {
+      // ignore
+    }
+  }
+
   return result.modifiedCount > 0;
 }
 

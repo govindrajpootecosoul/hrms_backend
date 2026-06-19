@@ -765,6 +765,11 @@ async function approveAttendanceRequest(req, res) {
     await connectMongo();
     const { requestId } = req.params;
     const { approvedBy } = req.body;
+
+    const { resolveActorFromRequest } = require('../../employee/services/approverResolver');
+    const actor = await resolveActorFromRequest(req, { nameFromBody: approvedBy, roleHint: 'hr' });
+    const approverName = actor.name;
+    const approverUserId = actor.userId;
     
     if (!requestId) {
       return res.status(400).json({ success: false, error: 'Request ID is required' });
@@ -866,7 +871,8 @@ async function approveAttendanceRequest(req, res) {
         $set: {
           status: 'approved',
           approvedAt: new Date(),
-          approvedBy: approvedBy || 'Admin',
+          approvedBy: approverName,
+          approvedByUserId: approverUserId ? String(approverUserId) : null,
           approvedByRole: 'hr',
           updatedAt: new Date()
         }
@@ -884,18 +890,19 @@ async function approveAttendanceRequest(req, res) {
       console.warn(`[hrms-portal] Update matched but did not modify - request may already be approved`);
     }
 
-    console.log(`[hrms-portal] ✅ Attendance request ${requestId} approved by ${approvedBy || 'Admin'}`);
+    console.log(`[hrms-portal] ✅ Attendance request ${requestId} approved by ${approverName}`);
 
     // Trigger notification to applicant employee
     try {
       const { triggerDecisionNotification } = require('../../employee/services/notificationService');
-      triggerDecisionNotification({
+      await triggerDecisionNotification({
         company,
         requestDoc: request,
         action: 'approve',
-        decidedByUserId: null,
-        decidedByName: approvedBy || 'HR/Admin'
-      }).catch(err => console.error('[approveAttendanceRequest] Notification trigger failed:', err));
+        decidedByUserId: approverUserId,
+        decidedByName: approverName,
+        approverRole: 'hr',
+      });
     } catch (notifErr) {
       console.error('[approveAttendanceRequest] Failed to load Notification Service:', notifErr);
     }
@@ -908,7 +915,7 @@ async function approveAttendanceRequest(req, res) {
           employeeId: request.employeeId,
           dateYmd: request.date,
           timeWindow: request.timeWindow,
-          approvedBy: approvedBy || 'Admin',
+          approvedBy: approverName,
         });
         if (!patch.applied) {
           console.warn('[hrms-portal] Regularization approved but machine attendance not updated:', patch.reason);
@@ -955,6 +962,11 @@ async function rejectAttendanceRequest(req, res) {
     await connectMongo();
     const { requestId } = req.params;
     const { rejectedBy, rejectionReason } = req.body;
+
+    const { resolveActorFromRequest } = require('../../employee/services/approverResolver');
+    const actor = await resolveActorFromRequest(req, { nameFromBody: rejectedBy, roleHint: 'hr' });
+    const rejectorName = actor.name;
+    const rejectorUserId = actor.userId;
     
     if (!requestId) {
       return res.status(400).json({ success: false, error: 'Request ID is required' });
@@ -984,7 +996,8 @@ async function rejectAttendanceRequest(req, res) {
         $set: {
           status: 'rejected',
           rejectedAt: new Date(),
-          rejectedBy: rejectedBy || 'Admin',
+          rejectedBy: rejectorName,
+          rejectedByUserId: rejectorUserId ? String(rejectorUserId) : null,
           rejectedByRole: 'hr',
           rejectionReason: rejectionReason || '',
           updatedAt: new Date()
@@ -999,18 +1012,19 @@ async function rejectAttendanceRequest(req, res) {
       });
     }
 
-    console.log(`[hrms-portal] Attendance request ${requestId} rejected by ${rejectedBy || 'Admin'}`);
+    console.log(`[hrms-portal] Attendance request ${requestId} rejected by ${rejectorName}`);
 
     // Trigger notification to applicant employee
     try {
       const { triggerDecisionNotification } = require('../../employee/services/notificationService');
-      triggerDecisionNotification({
+      await triggerDecisionNotification({
         company,
         requestDoc: request,
         action: 'reject',
-        decidedByUserId: null,
-        decidedByName: rejectedBy || 'HR/Admin'
-      }).catch(err => console.error('[rejectAttendanceRequest] Notification trigger failed:', err));
+        decidedByUserId: rejectorUserId,
+        decidedByName: rejectorName,
+        approverRole: 'hr',
+      });
     } catch (notifErr) {
       console.error('[rejectAttendanceRequest] Failed to load Notification Service:', notifErr);
     }
