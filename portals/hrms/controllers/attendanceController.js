@@ -9,6 +9,7 @@ const {
 } = require('../utils/hrmsContext');
 const { getDb, LOGIN_DB_NAME } = require('../../../config/mongo');
 const responseCache = require('../../../lib/responseCache');
+const { storedCheckTimeToDate } = require('../../../lib/checkinTimeFormat');
 
 /** `dateRange` may be Date, object, or string — .split only exists on strings */
 function splitDateRangeParts(dateRange) {
@@ -30,9 +31,14 @@ function isValidDate(d) {
   return d instanceof Date && !Number.isNaN(d.getTime());
 }
 
-function parseCheckTime(value) {
+function parseCheckTime(value, dateYmd) {
   if (value == null || value === '') return null;
-  const d = value instanceof Date ? value : new Date(value);
+  if (value instanceof Date) return isValidDate(value) ? value : null;
+  if (dateYmd) {
+    const fromStored = storedCheckTimeToDate(dateYmd, value);
+    if (fromStored) return fromStored;
+  }
+  const d = new Date(value);
   return isValidDate(d) ? d : null;
 }
 
@@ -595,8 +601,8 @@ async function listAttendance(req, res) {
     const manualRecords = checkIns
       .filter((record) => record && record._id != null)
       .map((record) => {
-        const checkInTime = parseCheckTime(record.checkInTime);
-        const checkOutTime = parseCheckTime(record.checkOutTime);
+        const checkInTime = parseCheckTime(record.checkInTime, record.date);
+        const checkOutTime = parseCheckTime(record.checkOutTime, record.date);
 
         const storedEmpCode = normalizeEmpCode(record.empCode || record.emp_code);
         const employeeInfo = employeeByEmployeeId.get(record.employeeId) || {
@@ -1365,7 +1371,7 @@ async function attendanceStats(req, res) {
       if (isWFHCheckin(c)) continue;
       if (countedLate.has(normalizedId)) continue;
 
-      const t = parseCheckTime(c.checkInTime);
+      const t = parseCheckTime(c.checkInTime, c.date);
       if (t && isLateByPunchIn(t)) countedLate.add(normalizedId);
     }
     const lateCheckIns = countedLate.size;
@@ -1668,7 +1674,7 @@ async function attendanceStatsByDepartment(req, res) {
       if (wfhSet && wfhSet.has(canonicalId)) continue;
       addToDeptSet(presentByDept, deptKey, canonicalId);
 
-      const checkInTime = parseCheckTime(c.checkInTime);
+      const checkInTime = parseCheckTime(c.checkInTime, c.date);
       if (checkInTime && isLateByPunchIn(checkInTime)) {
         const k = `${deptKey}::${canonicalId}`;
         if (!seenLateKey.has(k)) {
@@ -1926,7 +1932,7 @@ async function attendanceStatsTrends(req, res) {
         if (onLeave.has(canonicalId) || wfh.has(canonicalId)) continue;
         present.add(canonicalId);
 
-        const t = parseCheckTime(c.checkInTime);
+        const t = parseCheckTime(c.checkInTime, c.date);
         if (t && isLateByPunchIn(t)) {
           if (!countedLate.has(canonicalId)) {
             countedLate.add(canonicalId);

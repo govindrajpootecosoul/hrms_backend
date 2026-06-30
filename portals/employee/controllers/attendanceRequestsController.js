@@ -1,5 +1,6 @@
 const { getCompanyFromRequest } = require('../utils/employeeContext');
 const { submitRequest, listRequests, getManagerScope, listTeamRequests, decideRequest } = require('../services/attendanceRequestsService');
+const emailService = require('../services/requestEmailService');
 
 async function submitAttendanceRequest(req, res) {
   try {
@@ -110,10 +111,80 @@ async function decideTeamAttendanceRequest(req, res) {
   }
 }
 
+async function getAttendanceRequestEmailRecipients(req, res) {
+  try {
+    const company = getCompanyFromRequest(req);
+    if (!company) return res.status(400).json({ success: false, error: 'company is required' });
+    const employeeId = req.query.employeeId;
+    if (!employeeId) return res.status(400).json({ success: false, error: 'employeeId is required' });
+
+    const data = await emailService.getEmailRecipients({ employeeId, company });
+    res.json({ success: true, data });
+  } catch (err) {
+    console.error('[attendance-request/email-recipients] Error:', err);
+    res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+}
+
+async function sendAttendanceRequestEmail(req, res) {
+  try {
+    const company = getCompanyFromRequest(req);
+    if (!company) return res.status(400).json({ success: false, error: 'company is required' });
+    const { requestId } = req.params;
+    const { to, cc, sentByUserId, sentByName } = req.body || {};
+
+    const data = await emailService.sendRequestEmail({
+      requestId,
+      company,
+      to,
+      cc,
+      sentByUserId,
+      sentByName,
+    });
+    res.json({ success: true, data });
+  } catch (err) {
+    const code = err.statusCode || 500;
+    if (code === 400 || code === 404 || code === 503) {
+      return res.status(code).json({ success: false, error: err.message });
+    }
+    console.error('[attendance-request/send-email] Error:', err);
+    res.status(500).json({ success: false, error: err.message || 'Failed to send email' });
+  }
+}
+
+async function replyAttendanceRequest(req, res) {
+  try {
+    const company = getCompanyFromRequest(req);
+    if (!company) return res.status(400).json({ success: false, error: 'company is required' });
+    const { requestId } = req.params;
+    const { message, authorUserId, authorName, authorRole } = req.body || {};
+
+    const data = await emailService.addRequestReply({
+      requestId,
+      company,
+      message,
+      authorUserId,
+      authorName,
+      authorRole,
+    });
+    res.json({ success: true, data });
+  } catch (err) {
+    const code = err.statusCode || 500;
+    if (code === 400 || code === 404) {
+      return res.status(code).json({ success: false, error: err.message });
+    }
+    console.error('[attendance-request/reply] Error:', err);
+    res.status(500).json({ success: false, error: err.message || 'Failed to add reply' });
+  }
+}
+
 module.exports = {
   submitAttendanceRequest,
   listAttendanceRequests,
   managerScope,
   listTeamAttendanceRequests,
   decideTeamAttendanceRequest,
+  getAttendanceRequestEmailRecipients,
+  sendAttendanceRequestEmail,
+  replyAttendanceRequest,
 };

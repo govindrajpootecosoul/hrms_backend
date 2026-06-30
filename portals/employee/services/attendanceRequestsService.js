@@ -280,6 +280,10 @@ async function listRequests({ employeeId, company }) {
       employeeName: req.employeeName,
       employeeEmail: req.employeeEmail,
       employeeDepartment: req.employeeDepartment,
+      emailSentAt: req.emailSentAt || null,
+      emailTo: req.emailTo || [],
+      emailCc: req.emailCc || [],
+      emailThread: Array.isArray(req.emailThread) ? req.emailThread : [],
     })),
   };
 }
@@ -369,6 +373,10 @@ async function listTeamRequests({ managerUserId, company, status = 'pending', ty
       rejectedBy: req.rejectedBy,
       rejectionReason: req.rejectionReason,
       updatedAt: req.updatedAt,
+      emailSentAt: req.emailSentAt || null,
+      emailTo: req.emailTo || [],
+      emailCc: req.emailCc || [],
+      emailThread: Array.isArray(req.emailThread) ? req.emailThread : [],
     })),
   };
 }
@@ -477,4 +485,11 @@ async function decideRequest({ requestId, company, action, decidedByUserId, deci
   return { requestId: String(requestId), status: act === 'approve' ? 'approved' : 'rejected' };
 }
 
-module.exports = { submitRequest, listRequests, getManagerScope, listTeamRequests, decideRequest };
+module.exports = {
+  submitRequest,
+  listRequests,
+  getManagerScope,
+  listTeamRequests,
+  decideRequest,
+  getRequestsCollection,
+};

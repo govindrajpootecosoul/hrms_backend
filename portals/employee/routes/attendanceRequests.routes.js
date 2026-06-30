@@ -4,6 +4,9 @@ const router = express.Router();
 const c = require('../controllers/attendanceRequestsController');
 
 router.post('/attendance-request', c.submitAttendanceRequest);
+router.get('/attendance-request/email-recipients', c.getAttendanceRequestEmailRecipients);
+router.post('/attendance-request/:requestId/send-email', c.sendAttendanceRequestEmail);
+router.post('/attendance-request/:requestId/reply', c.replyAttendanceRequest);
 router.get('/attendance-requests', c.listAttendanceRequests);
 router.get('/manager-scope', c.managerScope);
 router.get('/team-attendance-requests', c.listTeamAttendanceRequests);

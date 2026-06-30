@@ -1,5 +1,9 @@
 const { getDb, getEmployeePortalDb, getUsersCollection, LOGIN_DB_NAME } = require('../../../config/mongo');
 const { EMPLOYEE_CHECKINS } = require('../models');
+const {
+  dateToOfficeHm,
+  storedCheckTimeToIso,
+} = require('../../../lib/checkinTimeFormat');
 
 function todayYMD() {
   return new Date().toISOString().split('T')[0];
@@ -250,10 +254,11 @@ async function checkinEmployee({ employeeId, company }) {
   const profile = await resolveEmployeeForCheckin({ employeeId, company });
 
   const checkInTime = new Date();
+  const checkInHm = dateToOfficeHm(checkInTime);
   const checkInDoc = {
     employeeId,
     date: today,
-    checkInTime: checkInTime.toISOString(),
+    checkInTime: checkInHm,
     checkOutTime: null,
     totalMinutes: accumulatedMinutes,
     status: 'checked-in',
@@ -267,7 +272,7 @@ async function checkinEmployee({ employeeId, company }) {
   await col.insertOne(checkInDoc);
 
   return {
-    checkInTime: checkInDoc.checkInTime,
+    checkInTime: storedCheckTimeToIso(today, checkInHm),
     status: 'checked-in',
     totalMinutes: accumulatedMinutes,
     employeeId,
@@ -294,20 +299,24 @@ async function checkoutEmployee({ employeeId, company }) {
     throw err;
   }
 
-  const checkOutTime = new Date();
-  const checkInTime = new Date(checkIn.checkInTime);
-  const sessionMinutes = Math.max(0, (checkOutTime.getTime() - checkInTime.getTime()) / 60000);
+  const checkOutNow = new Date();
+  const recordDate = checkIn.date || today;
+  const checkInIso = storedCheckTimeToIso(recordDate, checkIn.checkInTime);
+  const sessionMinutes = checkInIso
+    ? Math.max(0, (checkOutNow.getTime() - new Date(checkInIso).getTime()) / 60000)
+    : 0;
   const totalMinutes = (checkIn.totalMinutes || 0) + sessionMinutes;
+  const checkOutHm = dateToOfficeHm(checkOutNow);
 
   const needsProfile =
     !checkIn.empCode || !checkIn.employeeName || !checkIn.department;
   const profile = needsProfile ? await resolveEmployeeForCheckin({ employeeId, company }) : null;
 
   const updateFields = {
-    checkOutTime: checkOutTime.toISOString(),
+    checkOutTime: checkOutHm,
     totalMinutes,
     status: 'checked-out',
-    updatedAt: checkOutTime,
+    updatedAt: checkOutNow,
   };
   if (needsProfile && profile) {
     if (!checkIn.empCode && profile.empCode) updateFields.empCode = profile.empCode;
@@ -318,7 +327,7 @@ async function checkoutEmployee({ employeeId, company }) {
   await col.updateOne({ _id: checkIn._id }, { $set: updateFields });
 
   return {
-    checkOutTime: checkOutTime.toISOString(),
+    checkOutTime: storedCheckTimeToIso(recordDate, checkOutHm, checkIn.checkInTime),
     totalMinutes,
     totalHours: (totalMinutes / 60).toFixed(2),
     status: 'checked-out',
@@ -354,9 +363,9 @@ async function getTodayStatus({ employeeId, company, cache }) {
 
   const mostRecentCheckIn = await col
     .find({ employeeId, date: { $in: [todayLocal, todayUtc] } })
-    .sort({ checkInTime: -1 })
+    .sort({ createdAt: -1 })
     .limit(1)
-    .project({ checkInTime: 1, checkOutTime: 1, totalMinutes: 1, status: 1 })
+    .project({ date: 1, checkInTime: 1, checkOutTime: 1, totalMinutes: 1, status: 1 })
     .next();
 
   const completedSessionsToday = await col.countDocuments({
@@ -419,7 +428,13 @@ async function getTodayStatus({ employeeId, company, cache }) {
   let totalMinutes = mostRecentCheckIn.totalMinutes || 0;
   let status = mostRecentCheckIn.status || (mostRecentCheckIn.checkOutTime ? 'checked-out' : 'checked-in');
 
-  const manualCheckInIso = mostRecentCheckIn.checkInTime || null;
+  const recordDate = mostRecentCheckIn.date || todayLocal;
+  const manualCheckInIso = mostRecentCheckIn.checkInTime
+    ? storedCheckTimeToIso(recordDate, mostRecentCheckIn.checkInTime)
+    : null;
+  const manualCheckOutIso = mostRecentCheckIn.checkOutTime
+    ? storedCheckTimeToIso(recordDate, mostRecentCheckIn.checkOutTime, mostRecentCheckIn.checkInTime)
+    : null;
   // Display: earliest punch when both machine and portal exist the same "segment".
   let earliestPunchInIso = null;
   if (machineCheckInIso && manualCheckInIso) {
@@ -454,7 +469,7 @@ async function getTodayStatus({ employeeId, company, cache }) {
   }
 
   if (mostRecentCheckIn.checkInTime && !mostRecentCheckIn.checkOutTime) {
-    const anchor = sessionAnchorIso ? new Date(sessionAnchorIso) : new Date(mostRecentCheckIn.checkInTime);
+    const anchor = sessionAnchorIso ? new Date(sessionAnchorIso) : new Date(manualCheckInIso);
     const now = new Date();
     const currentSessionMinutes = Math.max(0, (now.getTime() - anchor.getTime()) / 60000);
     totalMinutes = (mostRecentCheckIn.totalMinutes || 0) + currentSessionMinutes;
@@ -465,12 +480,12 @@ async function getTodayStatus({ employeeId, company, cache }) {
 
   const displayCheckInIso =
     status === 'checked-out'
-      ? machineCheckInIso || mostRecentCheckIn?.checkInTime || null
+      ? machineCheckInIso || manualCheckInIso || null
       : null;
   const displayCheckOutIso =
     status === 'checked-out'
-      ? machineCheckOutIso || mostRecentCheckIn.checkOutTime || null
-      : mostRecentCheckIn.checkOutTime || null;
+      ? machineCheckOutIso || manualCheckOutIso || null
+      : manualCheckOutIso || null;
   let displayTotalMinutes = totalMinutes;
   if (
     status === 'checked-out' &&
@@ -488,7 +503,7 @@ async function getTodayStatus({ employeeId, company, cache }) {
     checkOutTime: displayCheckOutIso,
     lastSessionCheckInTime:
       status === 'checked-out'
-        ? displayCheckInIso || mostRecentCheckIn?.checkInTime || null
+        ? displayCheckInIso || manualCheckInIso || null
         : null,
     totalMinutes: displayTotalMinutes,
     employeeId,
@@ -517,7 +532,7 @@ async function getHistory({ employeeId, company, limit = 30 }) {
   const col = await getCheckinsCollection(company);
   const history = await col
     .find({ employeeId })
-    .sort({ date: -1, checkInTime: -1 })
+    .sort({ date: -1, createdAt: -1 })
     .limit(limit)
     .toArray();
 
@@ -525,8 +540,8 @@ async function getHistory({ employeeId, company, limit = 30 }) {
     employeeId,
     history: history.map((record) => ({
       date: record.date,
-      checkInTime: record.checkInTime,
-      checkOutTime: record.checkOutTime,
+      checkInTime: storedCheckTimeToIso(record.date, record.checkInTime),
+      checkOutTime: storedCheckTimeToIso(record.date, record.checkOutTime, record.checkInTime),
       totalMinutes: record.totalMinutes,
       totalHours: record.totalMinutes ? (record.totalMinutes / 60).toFixed(2) : 0,
       status: record.status,
