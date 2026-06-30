@@ -1,6 +1,7 @@
 const { getCompanyFromRequest } = require('../utils/employeeContext');
 const { getOrCreateDoc } = require('../services/getOrCreateDoc');
 const { defaultDashboard, defaultAttendance, defaultRequests, defaultOrg, defaultReports } = require('../services/defaults');
+const { listOrgDirectory, mergeOrgWithDirectory } = require('../services/orgDirectoryService');
 const { connectMongo, getEmployeePortalDb } = require('../../../config/mongo');
 const {
   PORTAL_DASHBOARD,
@@ -105,8 +106,25 @@ async function getOrg(req, res) {
   try {
     const company = getCompanyFromRequest(req);
     if (!company) return res.status(400).json({ success: false, error: 'company is required' });
+    const employeeId = req.query.employeeId || null;
     const doc = await getOrCreateDoc(PORTAL_ORG, { key: 'org' }, defaultOrg(), company);
-    return res.json({ success: true, data: doc });
+
+    let directory = { departments: [], myDepartmentName: '' };
+    try {
+      directory = await listOrgDirectory({ company, employeeId });
+    } catch (err) {
+      console.warn('[org] directory lookup failed:', err.message);
+    }
+
+    const departments = mergeOrgWithDirectory(doc, directory);
+    return res.json({
+      success: true,
+      data: {
+        ...doc,
+        departments,
+        myDepartmentName: directory.myDepartmentName || '',
+      },
+    });
   } catch (err) {
     console.error('Org error:', err);
     res.status(500).json({ success: false, error: 'Internal server error' });

@@ -103,34 +103,20 @@ function dedupeRecipients(list) {
   return out;
 }
 
-async function getEmailRecipients({ employeeId, company }) {
+async function collectHrRecipientEntries(usersCol, company, applicant) {
+  const hrEntries = [];
   const normalizedCompany = normalizeCompany(company);
-  const usersCol = await getUsersCollection();
-  const applicant = await findApplicant(usersCol, normalizedCompany, employeeId);
-  const dept = normalizeDept(applicant?.department || '');
 
-  const cc = [];
-  const requester = recipientEntry(applicant, 'requester', 'You (requester)');
-  if (requester) cc.push(requester);
-
-  const managerUserIds = dept ? await findDepartmentManagerUserIds(normalizedCompany, dept) : [];
-  for (const managerId of managerUserIds) {
-    const manager = await usersCol.findOne({
-      _id: ObjectId.isValid(managerId) ? new ObjectId(managerId) : managerId,
-    });
-    const entry = recipientEntry(manager, 'manager', `Manager — ${dept || 'Department'}`);
-    if (entry) cc.push(entry);
+  const hrMailKeys = ['hr_mail', 'hrMail', 'HR_MAIL', 'hrEmail', 'hr_email'];
+  for (const key of hrMailKeys) {
+    const raw = String(applicant?.[key] || '').trim();
+    if (raw && raw.includes('@')) {
+      hrEntries.push({ email: raw, name: 'HR', role: 'hr', label: 'HR Mail' });
+    }
   }
 
-  const toOptions = [];
-
-  const hrAdminIds = await findHrmsAdminUserIds(usersCol, normalizedCompany);
-  for (const hrId of hrAdminIds) {
-    const hrUser = await usersCol.findOne({
-      _id: ObjectId.isValid(hrId) ? new ObjectId(hrId) : hrId,
-    });
-    const entry = recipientEntry(hrUser, 'hr', 'HR');
-    if (entry) toOptions.push(entry);
+  if (hrEntries.length) {
+    return dedupeRecipients(hrEntries);
   }
 
   const hrDeptUsers = await usersCol
@@ -138,15 +124,72 @@ async function getEmailRecipients({ employeeId, company }) {
       ...companyQuery(normalizedCompany),
       isActive: { $ne: false },
       department: { $regex: /^(hr|human resources)/i },
+      email: { $regex: /@/ },
     })
     .project({ name: 1, email: 1, department: 1 })
     .toArray();
 
   for (const hrUser of hrDeptUsers) {
     const entry = recipientEntry(hrUser, 'hr', 'HR');
-    if (entry) toOptions.push(entry);
+    if (entry) hrEntries.push(entry);
   }
 
+  const hrAdminIds = await findHrmsAdminUserIds(usersCol, normalizedCompany);
+  for (const hrId of hrAdminIds) {
+    const hrUser = await usersCol.findOne({
+      _id: ObjectId.isValid(hrId) ? new ObjectId(hrId) : hrId,
+    });
+    const entry = recipientEntry(hrUser, 'hr', 'HR');
+    if (entry) hrEntries.push(entry);
+  }
+
+  return dedupeRecipients(hrEntries);
+}
+
+async function resolveDefaultRecipients({ employeeId, company }) {
+  const normalizedCompany = normalizeCompany(company);
+  const usersCol = await getUsersCollection();
+  const applicant = await findApplicant(usersCol, normalizedCompany, employeeId);
+  const dept = normalizeDept(applicant?.department || '');
+
+  const ccRecipients = [];
+  const requester = recipientEntry(applicant, 'requester', 'You (requester)');
+  if (requester) ccRecipients.push(requester);
+
+  const managerUserIds = dept ? await findDepartmentManagerUserIds(normalizedCompany, dept) : [];
+  for (const managerId of managerUserIds) {
+    const manager = await usersCol.findOne({
+      _id: ObjectId.isValid(managerId) ? new ObjectId(managerId) : managerId,
+    });
+    const entry = recipientEntry(manager, 'manager', `Department Manager — ${dept || 'Team'}`);
+    if (entry) ccRecipients.push(entry);
+  }
+
+  const toRecipients = await collectHrRecipientEntries(usersCol, normalizedCompany, applicant);
+  const defaultCc = dedupeRecipients(ccRecipients);
+  const defaultTo = dedupeRecipients(toRecipients);
+
+  return {
+    toEmails: defaultTo.map((c) => c.email),
+    ccEmails: defaultCc.map((c) => c.email),
+    toRecipients: defaultTo,
+    ccRecipients: defaultCc,
+  };
+}
+
+async function getEmailRecipients({ employeeId, company }) {
+  const normalizedCompany = normalizeCompany(company);
+  const usersCol = await getUsersCollection();
+  const applicant = await findApplicant(usersCol, normalizedCompany, employeeId);
+  const dept = normalizeDept(applicant?.department || '');
+
+  const { toEmails, ccEmails, toRecipients, ccRecipients } = await resolveDefaultRecipients({
+    employeeId,
+    company: normalizedCompany,
+  });
+
+  const toOptions = [...toRecipients];
+  const managerUserIds = dept ? await findDepartmentManagerUserIds(normalizedCompany, dept) : [];
   for (const managerId of managerUserIds) {
     const manager = await usersCol.findOne({
       _id: ObjectId.isValid(managerId) ? new ObjectId(managerId) : managerId,
@@ -170,25 +213,20 @@ async function getEmailRecipients({ employeeId, company }) {
     if (entry) toOptions.push(entry);
   }
 
-  const defaultCc = dedupeRecipients(cc);
-
   const allSuggestions = dedupeRecipients(toOptions);
-
   const toSuggestions = allSuggestions.filter(
     (opt) =>
       (opt.role === 'hr' || opt.role === 'other') &&
-      !defaultCc.some((c) => c.email.toLowerCase() === opt.email.toLowerCase())
+      !ccRecipients.some((c) => c.email.toLowerCase() === opt.email.toLowerCase())
   );
 
-  const ccSuggestions = allSuggestions;
-
   return {
-    defaultTo: [],
-    defaultCc: defaultCc.map((c) => c.email),
-    ccRecipients: defaultCc,
+    defaultTo: toEmails,
+    defaultCc: ccEmails,
+    toRecipients,
+    ccRecipients,
     toSuggestions,
-    ccSuggestions,
-    // Back-compat for older clients
+    ccSuggestions: allSuggestions,
     toOptions: toSuggestions,
     mailConfigured: isGraphMailConfigured(),
   };
@@ -196,6 +234,7 @@ async function getEmailRecipients({ employeeId, company }) {
 
 function getRequestTypeLabel(requestDoc) {
   if (requestDoc.type === 'regularization') return 'Attendance Regularization';
+  if (requestDoc.type === 'on-duty') return 'Work From Home';
   if (requestDoc.type === 'time-off' && requestDoc.leaveType === 'Work From Home') return 'Work From Home';
   if (requestDoc.type === 'time-off') return `Leave (${requestDoc.leaveType || 'Time Off'})`;
   return 'Attendance Request';
@@ -216,6 +255,10 @@ function buildRequestEmailHtml(requestDoc) {
     lines.push(`<p><strong>Date:</strong> ${requestDoc.date || '—'}</p>`);
     lines.push(`<p><strong>Time window:</strong> ${requestDoc.timeWindow || '—'}</p>`);
     if (requestDoc.notes) lines.push(`<p><strong>Notes:</strong> ${requestDoc.notes}</p>`);
+  } else if (requestDoc.type === 'on-duty') {
+    lines.push(`<p><strong>Date:</strong> ${requestDoc.date || '—'}</p>`);
+    lines.push(`<p><strong>Location:</strong> ${requestDoc.location || '—'}</p>`);
+    if (requestDoc.details) lines.push(`<p><strong>Details:</strong> ${requestDoc.details}</p>`);
   }
 
   if (requestDoc.employeeDepartment) {
@@ -233,7 +276,7 @@ function buildRequestEmailSubject(requestDoc) {
   const detail =
     requestDoc.type === 'time-off'
       ? requestDoc.dateRange || ''
-      : requestDoc.type === 'regularization'
+      : requestDoc.type === 'regularization' || requestDoc.type === 'on-duty'
         ? requestDoc.date || ''
         : '';
   return `${typeLabel} — ${name}${detail ? ` (${detail})` : ''}`;
@@ -312,6 +355,30 @@ async function sendRequestEmail({ requestId, company, to, cc, sentByUserId, sent
   );
 
   return { requestId: String(requestId), emailSentAt: now, emailTo: toList, emailCc: ccList };
+}
+
+async function sendDefaultRequestEmail({ requestId, company, employeeId, sentByUserId, sentByName }) {
+  if (!isGraphMailConfigured()) {
+    return { skipped: true, reason: 'mail_not_configured' };
+  }
+
+  const { toEmails, ccEmails } = await resolveDefaultRecipients({ employeeId, company });
+  if (!toEmails.length) {
+    console.warn('[sendDefaultRequestEmail] No HR email found for company', company);
+    return { skipped: true, reason: 'no_hr_recipients' };
+  }
+
+  const toLower = new Set(toEmails.map((e) => e.toLowerCase()));
+  const ccDeduped = ccEmails.filter((e) => !toLower.has(e.toLowerCase()));
+
+  return sendRequestEmail({
+    requestId,
+    company,
+    to: toEmails,
+    cc: ccDeduped,
+    sentByUserId,
+    sentByName,
+  });
 }
 
 async function addRequestReply({ requestId, company, message, authorUserId, authorName, authorRole }) {
@@ -396,7 +463,9 @@ async function addRequestReply({ requestId, company, message, authorUserId, auth
 
 module.exports = {
   getEmailRecipients,
+  resolveDefaultRecipients,
   sendRequestEmail,
+  sendDefaultRequestEmail,
   addRequestReply,
   getRequestById,
   mapRequestForResponse,

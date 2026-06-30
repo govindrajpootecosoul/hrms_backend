@@ -7,4 +7,7 @@ router.use(require('./attendanceRequests.routes'));
 router.use(require('./machineAttendance.routes'));
 router.use(require('./notifications.routes'));
 
+const profile = require('../controllers/employeeProfileController');
+router.get('/profile', profile.getProfile);
+
 module.exports = router;

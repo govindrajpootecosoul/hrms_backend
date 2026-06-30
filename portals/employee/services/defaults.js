@@ -119,7 +119,6 @@ const defaultOrg = () => ({
 const defaultReports = () => ({
   reports: [
     { id: 'attendance', title: 'Attendance history', description: 'Daily presence, late marks, WFH logs.', formats: ['CSV', 'PDF'] },
-    { id: 'expenses', title: 'Expense submissions', description: 'All non-advance and advance-based claims.', formats: ['CSV', 'XLSX'] },
     { id: 'requests', title: 'Leave & request log', description: 'Leaves, WFH, and support tickets filed.', formats: ['CSV'] },
   ],
 });

@@ -5,6 +5,10 @@ const {
   storedCheckTimeToIso,
 } = require('../../../lib/checkinTimeFormat');
 
+/** Close open sessions automatically after 24 hours without checkout (manual or biometric display). */
+const AUTO_CHECKOUT_SESSION_MS = 24 * 60 * 60 * 1000;
+const AUTO_CHECKOUT_SESSION_MINUTES = AUTO_CHECKOUT_SESSION_MS / 60000;
+
 function todayYMD() {
   return new Date().toISOString().split('T')[0];
 }
@@ -44,6 +48,99 @@ function minutesBetweenIso(inIso, outIso) {
   const b = new Date(outIso).getTime();
   if (!Number.isFinite(a) || !Number.isFinite(b)) return 0;
   return Math.max(0, (b - a) / 60000);
+}
+
+function buildMachineForgottenCheckoutStatus({
+  employeeId,
+  machineCheckInIso,
+  machineCheckOutIso,
+  now = new Date(),
+}) {
+  if (!machineCheckInIso) return null;
+  const checkInMs = new Date(machineCheckInIso).getTime();
+  if (!Number.isFinite(checkInMs)) return null;
+  const elapsed = now.getTime() - checkInMs;
+  if (elapsed < AUTO_CHECKOUT_SESSION_MS) return null;
+
+  const checkoutIso = new Date(checkInMs + AUTO_CHECKOUT_SESSION_MS).toISOString();
+  return {
+    status: 'checked-out',
+    checkInTime: null,
+    checkOutTime: checkoutIso,
+    lastSessionCheckInTime: machineCheckInIso,
+    totalMinutes: AUTO_CHECKOUT_SESSION_MINUTES,
+    employeeId,
+    source: 'machine',
+    earliestPunchInTime: null,
+    machinePunchOutTime: machineCheckOutIso,
+    autoCheckoutFromMachine: false,
+    autoCheckoutFromForgotten: true,
+  };
+}
+
+/** Persist checkout on stale open manual sessions (forgot to check out). */
+async function autoCheckoutOpenSessionIfOverdue(col, record, now = new Date(), options = {}) {
+  if (!record || record.checkOutTime != null || !record.checkInTime) return false;
+
+  const recordDate = record.date;
+  const manualCheckInIso = storedCheckTimeToIso(recordDate, record.checkInTime);
+  const machineCheckInIso = options.machineCheckInIso || null;
+  let anchorIso = manualCheckInIso;
+  if (machineCheckInIso && manualCheckInIso) {
+    anchorIso =
+      new Date(machineCheckInIso).getTime() <= new Date(manualCheckInIso).getTime()
+        ? machineCheckInIso
+        : manualCheckInIso;
+  } else if (machineCheckInIso) {
+    anchorIso = machineCheckInIso;
+  }
+  if (!anchorIso) return false;
+
+  const checkInMs = new Date(anchorIso).getTime();
+  if (!Number.isFinite(checkInMs)) return false;
+  const elapsed = now.getTime() - checkInMs;
+  if (elapsed < AUTO_CHECKOUT_SESSION_MS) return false;
+
+  const checkoutDate = new Date(checkInMs + AUTO_CHECKOUT_SESSION_MS);
+  const totalMinutes = (record.totalMinutes || 0) + AUTO_CHECKOUT_SESSION_MINUTES;
+  const checkOutHm = dateToOfficeHm(checkoutDate);
+
+  await col.updateOne(
+    { _id: record._id },
+    {
+      $set: {
+        checkOutTime: checkOutHm,
+        totalMinutes,
+        status: 'checked-out',
+        updatedAt: now,
+        autoCheckout: true,
+      },
+    }
+  );
+  return true;
+}
+
+async function autoCheckoutStaleSessions(col, employeeId, options = {}) {
+  const { machineCheckInIso, todayLocal, todayUtc } = options;
+  const todayDates = [todayLocal, todayUtc].filter(Boolean);
+
+  const openSessions = await col
+    .find({ employeeId, checkOutTime: null, checkInTime: { $ne: null } })
+    .sort({ createdAt: 1 })
+    .toArray();
+
+  if (!openSessions.length) return false;
+
+  const now = new Date();
+  let updated = false;
+  for (const session of openSessions) {
+    const isToday = todayDates.length > 0 && todayDates.includes(session.date);
+    const didUpdate = await autoCheckoutOpenSessionIfOverdue(col, session, now, {
+      machineCheckInIso: isToday ? machineCheckInIso : null,
+    });
+    if (didUpdate) updated = true;
+  }
+  return updated;
 }
 
 /** Portal auto-checkout when machine punch_out exists at/after 3 PM (no manual checkout). */
@@ -219,6 +316,7 @@ async function getCheckinsCollection(company) {
 }
 
 async function ensureNotCheckedIn(col, employeeId, today) {
+  await autoCheckoutStaleSessions(col, employeeId);
   const existing = await col.findOne({ employeeId, date: today, checkOutTime: null });
   if (existing) {
     const err = new Error('Already checked in today. Please check out first.');
@@ -292,6 +390,8 @@ async function checkoutEmployee({ employeeId, company }) {
   const col = await getCheckinsCollection(company);
   const today = todayYMD();
 
+  await autoCheckoutStaleSessions(col, employeeId);
+
   const checkIn = await col.findOne({ employeeId, date: today, checkOutTime: null });
   if (!checkIn) {
     const err = new Error('No active check-in found. Please check in first.');
@@ -348,24 +448,38 @@ async function getTodayStatus({ employeeId, company, cache }) {
   const cacheKey = `${company || 'default'}:${employeeId}`;
   const nowTs = Date.now();
 
+  const col = await getCheckinsCollection(company);
+  const todayLocal = localTodayYMD();
+  const todayUtc = todayYMD();
+
+  const machine = await getMachinePunchForEmployee({ employeeId, company, dateYmd: todayLocal });
+  const machineCheckInIso = machine?.punchIn ? timeHmToIso(todayLocal, machine.punchIn) : null;
+  const machineCheckOutIso = machine?.punchOut ? timeHmToIso(todayLocal, machine.punchOut) : null;
+
+  const autoCheckedOut = await autoCheckoutStaleSessions(col, employeeId, {
+    machineCheckInIso,
+    todayLocal,
+    todayUtc,
+  });
+
   if (cache) {
-    const cached = cache.map.get(cacheKey);
-    if (cached && nowTs - cached.ts < cache.ttlMs) {
-      return cached.data;
+    if (autoCheckedOut) {
+      cache.map.delete(cacheKey);
+    } else {
+      const cached = cache.map.get(cacheKey);
+      if (cached && nowTs - cached.ts < cache.ttlMs) {
+        return cached.data;
+      }
     }
   }
 
-  const col = await getCheckinsCollection(company);
-  // Prefer local date for UI correctness, but also allow UTC date for existing records.
-  const todayLocal = localTodayYMD();
-  const todayUtc = todayYMD();
   const today = todayLocal;
 
   const mostRecentCheckIn = await col
     .find({ employeeId, date: { $in: [todayLocal, todayUtc] } })
     .sort({ createdAt: -1 })
     .limit(1)
-    .project({ date: 1, checkInTime: 1, checkOutTime: 1, totalMinutes: 1, status: 1 })
+    .project({ _id: 1, date: 1, checkInTime: 1, checkOutTime: 1, totalMinutes: 1, status: 1 })
     .next();
 
   const completedSessionsToday = await col.countDocuments({
@@ -373,11 +487,6 @@ async function getTodayStatus({ employeeId, company, cache }) {
     date: { $in: [todayLocal, todayUtc] },
     checkOutTime: { $ne: null },
   });
-
-  // Machine punch (biometric/card) can exist even if user hasn't clicked manual check-in.
-  const machine = await getMachinePunchForEmployee({ employeeId, company, dateYmd: todayLocal });
-  const machineCheckInIso = machine?.punchIn ? timeHmToIso(todayLocal, machine.punchIn) : null;
-  const machineCheckOutIso = machine?.punchOut ? timeHmToIso(todayLocal, machine.punchOut) : null;
 
   const machineAutoOut = buildMachineAutoCheckoutStatus({
     employeeId,
@@ -389,6 +498,16 @@ async function getTodayStatus({ employeeId, company, cache }) {
   if (machineAutoOut) {
     if (cache) cache.map.set(cacheKey, { ts: nowTs, data: machineAutoOut });
     return machineAutoOut;
+  }
+
+  const machineForgottenOut = buildMachineForgottenCheckoutStatus({
+    employeeId,
+    machineCheckInIso,
+    machineCheckOutIso,
+  });
+  if (machineForgottenOut && !mostRecentCheckIn) {
+    if (cache) cache.map.set(cacheKey, { ts: nowTs, data: machineForgottenOut });
+    return machineForgottenOut;
   }
 
   if (!mostRecentCheckIn) {
@@ -471,7 +590,35 @@ async function getTodayStatus({ employeeId, company, cache }) {
   if (mostRecentCheckIn.checkInTime && !mostRecentCheckIn.checkOutTime) {
     const anchor = sessionAnchorIso ? new Date(sessionAnchorIso) : new Date(manualCheckInIso);
     const now = new Date();
-    const currentSessionMinutes = Math.max(0, (now.getTime() - anchor.getTime()) / 60000);
+    const elapsedMs = now.getTime() - anchor.getTime();
+
+    if (elapsedMs >= AUTO_CHECKOUT_SESSION_MS) {
+      await autoCheckoutOpenSessionIfOverdue(col, mostRecentCheckIn, now, {
+        machineCheckInIso,
+      });
+      const closed = await col.findOne({ _id: mostRecentCheckIn._id });
+      if (closed?.checkOutTime) {
+        const closedCheckInIso = storedCheckTimeToIso(closed.date, closed.checkInTime);
+        const closedCheckOutIso = storedCheckTimeToIso(closed.date, closed.checkOutTime, closed.checkInTime);
+        const data = {
+          status: 'checked-out',
+          checkInTime: null,
+          checkOutTime: closedCheckOutIso,
+          lastSessionCheckInTime: closedCheckInIso,
+          totalMinutes: closed.totalMinutes || AUTO_CHECKOUT_SESSION_MINUTES,
+          employeeId,
+          source,
+          earliestPunchInTime: null,
+          machinePunchOutTime: machineCheckOutIso,
+          autoCheckoutFromForgotten: true,
+          autoCheckoutFromMachine: false,
+        };
+        if (cache) cache.map.set(cacheKey, { ts: nowTs, data });
+        return data;
+      }
+    }
+
+    const currentSessionMinutes = Math.max(0, elapsedMs / 60000);
     totalMinutes = (mostRecentCheckIn.totalMinutes || 0) + currentSessionMinutes;
     status = 'checked-in';
   } else {
@@ -530,6 +677,8 @@ async function getHistory({ employeeId, company, limit = 30 }) {
   }
 
   const col = await getCheckinsCollection(company);
+  await autoCheckoutStaleSessions(col, employeeId);
+
   const history = await col
     .find({ employeeId })
     .sort({ date: -1, createdAt: -1 })

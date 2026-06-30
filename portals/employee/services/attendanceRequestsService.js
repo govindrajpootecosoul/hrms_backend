@@ -243,6 +243,20 @@ async function submitRequest({ employeeId, company, body }) {
     console.error('[submitRequest] Notification trigger failed:', notifErr);
   }
 
+  // Auto-email HR (TO) with requester + department manager (CC)
+  try {
+    const { sendDefaultRequestEmail } = require('./requestEmailService');
+    await sendDefaultRequestEmail({
+      requestId: result.insertedId,
+      company,
+      employeeId,
+      sentByUserId: null,
+      sentByName: employeeProfile?.employeeName || employeeId,
+    });
+  } catch (mailErr) {
+    console.error('[submitRequest] Default request email failed:', mailErr);
+  }
+
   // Attendance requests can affect dashboard stats once approved (and are visible in pending counts).
   emitAttendanceChanged({ company, type: 'attendance_request_submitted', date: (date || new Date().toISOString().slice(0, 10)) });
   return { requestId: result.insertedId, type, status: 'pending' };
