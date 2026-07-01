@@ -65,11 +65,13 @@ function getTitleForRequest(requestDoc) {
 function getMessageForRequest(requestDoc, applicantName) {
   const type = requestDoc.type;
   const name = applicantName || requestDoc.employeeName || 'An employee';
+  const duration =
+    type === 'time-off' ? (requestDoc.halfDay ? ' (half day)' : ' (full day)') : '';
   if (type === 'time-off') {
     if (requestDoc.leaveType === 'Work From Home') {
-      return `${name} has requested Work From Home.`;
+      return `${name} has requested Work From Home${duration}.`;
     }
-    return `${name} has requested Leave (${requestDoc.leaveType || 'Time Off'}).`;
+    return `${name} has requested Leave (${requestDoc.leaveType || 'Time Off'})${duration}.`;
   } else if (type === 'regularization') {
     return `${name} has requested Attendance Regularization for ${requestDoc.date || 'specified date'}.`;
   }
@@ -85,11 +87,13 @@ function getDecisionMessage(requestDoc, action, decidedByName, approverRole) {
   if (!name) {
     decBy = role === 'hr' ? 'HR' : 'Department Manager';
   }
+  const duration =
+    type === 'time-off' ? (requestDoc.halfDay ? ' Half day.' : ' Full day.') : '';
   if (type === 'time-off') {
     if (requestDoc.leaveType === 'Work From Home') {
-      return `Your Work From Home request has been ${act} by ${decBy}.`;
+      return `Your Work From Home request has been ${act} by ${decBy}.${duration}`;
     }
-    return `Your Leave request (${requestDoc.leaveType || 'Time Off'}) has been ${act} by ${decBy}.`;
+    return `Your Leave request (${requestDoc.leaveType || 'Time Off'}) has been ${act} by ${decBy}.${duration}`;
   } else if (type === 'regularization') {
     return `Your Attendance Regularization request for ${requestDoc.date || 'specified date'} has been ${act} by ${decBy}.`;
   }
@@ -280,6 +284,19 @@ async function triggerDecisionNotification({ company, requestDoc, action, decide
       referenceId: String(requestDoc._id || requestDoc.id),
       audience: 'employee_portal',
     });
+
+    try {
+      const { sendDecisionEmail } = require('./requestEmailService');
+      await sendDecisionEmail({
+        company: normalizedCompany,
+        requestDoc,
+        action,
+        decidedByName,
+        approverRole,
+      });
+    } catch (mailErr) {
+      console.error('[NotificationService] Decision email failed:', mailErr);
+    }
   } catch (error) {
     console.error('[NotificationService] Error triggering decision notification:', error);
   }

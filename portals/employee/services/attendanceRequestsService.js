@@ -1,6 +1,8 @@
 const { getDb, getEmployeePortalDb, getUsersCollection, LOGIN_DB_NAME } = require('../../../config/mongo');
 const { ATTENDANCE_REQUESTS } = require('../models');
 const { emitAttendanceChanged } = require('../../../lib/attendanceEvents');
+const { validateTimeOffBalance, deductTimeOffOnApproval } = require('../../../lib/leaveBalanceService');
+const { validateLeaveWfhSingleDate, validateLeaveWfhDateRange } = require('../../../lib/leaveRequestDateWindow');
 const { ObjectId } = require('mongodb');
 const { normalizeCompany, companyQuery } = require('../../hrms/utils/hrmsContext');
 
@@ -142,7 +144,7 @@ async function ensureNoDuplicateRequest({ col, employeeId, type, date, dateRange
 
     const overlap = existing.some((r) => rangesOverlap(parseDateRangeString(r.dateRange), requested));
     if (overlap) {
-      const err = new Error('You already have a leave request of this type for the same date(s). Please update the existing request instead of creating a duplicate.');
+      const err = new Error('You have already applied leave for this date.');
       err.statusCode = 400;
       throw err;
     }
@@ -165,15 +167,31 @@ function validateFields(type, body) {
     err.statusCode = 400;
     throw err;
   }
-  if (type === 'on-duty' && (!date || !location)) {
-    const err = new Error('Date and location are required for on-duty request');
-    err.statusCode = 400;
-    throw err;
+  if (type === 'on-duty') {
+    if (!date || !location) {
+      const err = new Error('Date and location are required for on-duty request');
+      err.statusCode = 400;
+      throw err;
+    }
+    const windowCheck = validateLeaveWfhSingleDate(date);
+    if (!windowCheck.ok) {
+      const err = new Error(windowCheck.error);
+      err.statusCode = 400;
+      throw err;
+    }
   }
-  if (type === 'time-off' && (!dateRange || !reason)) {
-    const err = new Error('Date range and reason are required for time-off request');
-    err.statusCode = 400;
-    throw err;
+  if (type === 'time-off') {
+    if (!dateRange || !reason) {
+      const err = new Error('Date range and reason are required for time-off request');
+      err.statusCode = 400;
+      throw err;
+    }
+    const windowCheck = validateLeaveWfhDateRange(dateRange);
+    if (!windowCheck.ok) {
+      const err = new Error(windowCheck.error);
+      err.statusCode = 400;
+      throw err;
+    }
   }
 }
 
@@ -191,7 +209,7 @@ async function submitRequest({ employeeId, company, body }) {
 
   const col = await getRequestsCollection(company);
 
-  const { date, timeWindow, notes, location, details, dateRange, reason, leaveType } = body;
+  const { date, timeWindow, notes, location, details, dateRange, reason, leaveType, halfDay } = body;
 
   await ensureNoDuplicateRequest({
     col,
@@ -201,6 +219,21 @@ async function submitRequest({ employeeId, company, body }) {
     dateRange,
     leaveType,
   });
+
+  if (type === 'time-off') {
+    const balanceCheck = await validateTimeOffBalance({
+      company,
+      employeeId,
+      leaveType: leaveType || 'Time Off',
+      dateRange,
+      halfDay: Boolean(halfDay),
+    });
+    if (!balanceCheck.ok) {
+      const err = new Error(balanceCheck.error || 'Insufficient leave balance');
+      err.statusCode = 400;
+      throw err;
+    }
+  }
 
   const employeeProfileRaw = await fetchEmployeeProfileForRequest({ employeeId, company });
   const employeeProfile = employeeProfileRaw
@@ -224,6 +257,7 @@ async function submitRequest({ employeeId, company, body }) {
       dateRange,
       reason: reason || '',
       leaveType: leaveType || 'Time Off',
+      halfDay: Boolean(halfDay),
     }),
     createdAt: new Date(),
     updatedAt: new Date(),
@@ -278,6 +312,7 @@ async function listRequests({ employeeId, company }) {
       type: req.type,
       status: req.status,
       leaveType: req.leaveType,
+      halfDay: Boolean(req.halfDay),
       submittedAt: req.submittedAt,
       date: req.date,
       timeWindow: req.timeWindow,
@@ -373,6 +408,7 @@ async function listTeamRequests({ managerUserId, company, status = 'pending', ty
       type: req.type,
       status: req.status,
       leaveType: req.leaveType,
+      halfDay: Boolean(req.halfDay),
       submittedAt: req.submittedAt,
       dateRange: req.dateRange,
       reason: req.reason,
@@ -448,6 +484,30 @@ async function decideRequest({ requestId, company, action, decidedByUserId, deci
   const actor = await resolveActorByUserId(decidedByUserId, decidedByName, 'manager');
   const displayName = actor.name;
 
+  let deductionMeta = null;
+  if (act === 'approve' && existing.type === 'time-off') {
+    const deduction = await deductTimeOffOnApproval({
+      company,
+      request: existing,
+      performedBy: displayName,
+      approverRole: 'manager',
+    });
+    if (!deduction.ok) {
+      const err = new Error(deduction.error || 'Leave balance deduction failed');
+      err.statusCode = 400;
+      throw err;
+    }
+    if (deduction.days) {
+      deductionMeta = {
+        leaveDaysDeducted: deduction.days,
+        leaveBalanceKey: deduction.leaveKey || existing.leaveType || 'Casual Leave',
+        leaveBalanceDeductedAt: now,
+        leaveBalanceDeductedBy: displayName,
+        leaveBalanceDeductedByRole: 'manager',
+      };
+    }
+  }
+
   const update =
     act === 'approve'
       ? {
@@ -458,6 +518,7 @@ async function decideRequest({ requestId, company, action, decidedByUserId, deci
             approvedByUserId: String(decidedByUserId),
             approvedByRole: 'manager',
             updatedAt: now,
+            ...(deductionMeta || {}),
           },
         }
       : {
@@ -496,6 +557,9 @@ async function decideRequest({ requestId, company, action, decidedByUserId, deci
   }
 
   emitAttendanceChanged({ company, type: `attendance_request_${act}d_by_manager`, date: new Date().toISOString().slice(0, 10) });
+  if (deductionMeta) {
+    emitAttendanceChanged({ company, type: 'leave_balance_deducted_on_approval', date: new Date().toISOString().slice(0, 10) });
+  }
   return { requestId: String(requestId), status: act === 'approve' ? 'approved' : 'rejected' };
 }
 

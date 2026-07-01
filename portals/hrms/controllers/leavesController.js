@@ -12,6 +12,7 @@ const {
 } = require('../utils/hrmsContext');
 const { emitAttendanceChanged } = require('../../../lib/attendanceEvents');
 const { invalidateAttendanceCaches, invalidatePayrollCaches } = require('../../../lib/cacheInvalidation');
+const { deductTimeOffOnApproval } = require('../../../lib/leaveBalanceService');
 
 const LEAVE_BALANCES_COLLECTION = 'leave_balances';
 const LEAVE_BALANCE_HISTORY_COLLECTION = 'leave_balance_history';
@@ -21,8 +22,29 @@ const DEFAULT_LEAVE_BALANCES = {
   'Earned Leave': 0,
   'Work From Home': 0,
   'Compensatory Off': 0,
+  'Maternity Leave': 0,
   'LOP': 0,
 };
+
+const STANDARD_LEAVE_ALLOCATIONS = {
+  'Casual Leave': 12,
+  'Sick Leave': 0,
+  'Earned Leave': 0,
+  'Work From Home': 15,
+  'Compensatory Off': 0,
+  'Maternity Leave': 182,
+  'LOP': 0,
+};
+
+const BULK_ALLOCATION_KEYS = [
+  'Casual Leave',
+  'Sick Leave',
+  'Earned Leave',
+  'Work From Home',
+  'Compensatory Off',
+  'Maternity Leave',
+  'LOP',
+];
 
 function normalizeLeaveTypeKey(leaveType) {
   const raw = String(leaveType || '').trim();
@@ -36,7 +58,111 @@ function normalizeLeaveTypeKey(leaveType) {
   if (cleaned === 'loss of pay') return 'LOP';
   if (cleaned === 'comp off' || cleaned === 'compoff') return 'Compensatory Off';
   if (cleaned === 'wfh') return 'Work From Home';
+  if (cleaned === 'maternity leave' || cleaned === 'maternity') return 'Maternity Leave';
   return raw; // allow custom types without blocking
+}
+
+function isFemaleEmployee(gender) {
+  return String(gender || '').trim().toLowerCase() === 'female';
+}
+
+function resolveBulkAllocations(body) {
+  const input = body?.allocations && typeof body.allocations === 'object' ? body.allocations : null;
+  if (!input) return { ...STANDARD_LEAVE_ALLOCATIONS };
+
+  const resolved = {};
+  for (const leaveKey of BULK_ALLOCATION_KEYS) {
+    if (input[leaveKey] === undefined || input[leaveKey] === null || input[leaveKey] === '') {
+      if (STANDARD_LEAVE_ALLOCATIONS[leaveKey] !== undefined) {
+        resolved[leaveKey] = STANDARD_LEAVE_ALLOCATIONS[leaveKey];
+      }
+      continue;
+    }
+    resolved[leaveKey] = Math.max(0, safeInt(input[leaveKey], 0));
+  }
+
+  return Object.keys(resolved).length ? resolved : { ...STANDARD_LEAVE_ALLOCATIONS };
+}
+
+async function getEmployeeGenderForLeave(company, employeeId) {
+  const { getUsersCollection } = require('../../../config/mongo');
+  const usersCol = await getUsersCollection(null, company);
+  const empId = String(employeeId || '').trim();
+  if (!empId) return '';
+  const escapeRe = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const emp = await usersCol.findOne(
+    {
+      company,
+      $or: [
+        { employeeId: empId },
+        { employeeId: new RegExp(`^${escapeRe(empId)}$`, 'i') },
+        { email: new RegExp(`^${escapeRe(empId)}@`, 'i') },
+      ],
+    },
+    { projection: { gender: 1 } }
+  );
+  return emp?.gender || '';
+}
+
+async function getCompanyEmployeesForLeave(company) {
+  const { getUsersCollection } = require('../../../config/mongo');
+  const usersCol = await getUsersCollection(null, company);
+  const employees = await usersCol
+    .find({ company })
+    .project({ employeeId: 1, email: 1, gender: 1, name: 1 })
+    .toArray();
+  return employees
+    .map((emp) => ({
+      employeeId: String(emp.employeeId || emp.email?.split('@')[0] || '').trim(),
+      gender: emp.gender || '',
+      name: emp.name || '',
+    }))
+    .filter((e) => e.employeeId);
+}
+
+async function applyLeaveBalanceChange({
+  company,
+  employeeId,
+  leaveKey,
+  targetValue,
+  reason,
+  performedBy,
+  col,
+  historyCol,
+}) {
+  const existing = await col.findOne({ company, employeeId }, { projection: { balances: 1 } });
+  const prevBalances = { ...DEFAULT_LEAVE_BALANCES, ...(existing?.balances || {}) };
+  const prevValue = safeInt(prevBalances[leaveKey], 0);
+  const nextValue = Math.max(0, safeInt(targetValue, 0));
+  const appliedDelta = nextValue - prevValue;
+  if (appliedDelta === 0) {
+    return { changed: false, employeeId, leaveType: leaveKey, previous: prevValue, next: nextValue, delta: 0 };
+  }
+
+  const now = new Date();
+  await col.updateOne(
+    { company, employeeId },
+    {
+      $set: { updatedAt: now },
+      $setOnInsert: { company, employeeId, createdAt: now },
+      $inc: { [`balances.${leaveKey}`]: appliedDelta },
+    },
+    { upsert: true }
+  );
+
+  await historyCol.insertOne({
+    company,
+    employeeId,
+    leaveType: leaveKey,
+    delta: appliedDelta,
+    previous: prevValue,
+    next: nextValue,
+    reason: typeof reason === 'string' ? reason.trim() : '',
+    performedBy: typeof performedBy === 'string' ? performedBy.trim() : 'HR',
+    createdAt: now,
+  });
+
+  return { changed: true, employeeId, leaveType: leaveKey, previous: prevValue, next: nextValue, delta: appliedDelta };
 }
 
 function safeInt(n, fallback = 0) {
@@ -324,6 +450,16 @@ async function adjustLeaveBalance(req, res) {
     const { leaveType, delta, reason, performedBy } = req.body || {};
     const leaveKey = normalizeLeaveTypeKey(leaveType);
     if (!leaveKey) return res.status(400).json({ success: false, error: 'leaveType is required' });
+
+    if (leaveKey === 'Maternity Leave') {
+      const gender = await getEmployeeGenderForLeave(company, employeeId);
+      if (!isFemaleEmployee(gender)) {
+        return res.status(400).json({
+          success: false,
+          error: 'Maternity Leave is only applicable for female employees',
+        });
+      }
+    }
 
     const inc = safeInt(delta, 0);
     if (!inc) return res.status(400).json({ success: false, error: 'delta must be a non-zero number' });
@@ -864,6 +1000,31 @@ async function approveAttendanceRequest(req, res) {
       });
     }
 
+    let deductionMeta = null;
+    if (request.type === 'time-off') {
+      const deduction = await deductTimeOffOnApproval({
+        company,
+        request,
+        performedBy: approverName,
+        approverRole: 'hr',
+      });
+      if (!deduction.ok) {
+        return res.status(400).json({
+          success: false,
+          error: deduction.error || 'Leave balance deduction failed. Approval blocked.',
+        });
+      }
+      if (deduction.days) {
+        deductionMeta = {
+          leaveDaysDeducted: deduction.days,
+          leaveBalanceKey: deduction.leaveKey || request.leaveType || 'Casual Leave',
+          leaveBalanceDeductedAt: new Date(),
+          leaveBalanceDeductedBy: approverName,
+          leaveBalanceDeductedByRole: 'hr',
+        };
+      }
+    }
+
     // Perform the update (first-wins: only pending can be approved)
     const updateResult = await col.updateOne(
       { ...(updateQuery || {}), status: 'pending' },
@@ -874,7 +1035,8 @@ async function approveAttendanceRequest(req, res) {
           approvedBy: approverName,
           approvedByUserId: approverUserId ? String(approverUserId) : null,
           approvedByRole: 'hr',
-          updatedAt: new Date()
+          updatedAt: new Date(),
+          ...(deductionMeta || {}),
         }
       }
     );
@@ -932,6 +1094,9 @@ async function approveAttendanceRequest(req, res) {
     }
 
     emitAttendanceChanged({ company, type: 'attendance_request_approved', date: new Date().toISOString().slice(0, 10) });
+    if (deductionMeta) {
+      emitAttendanceChanged({ company, type: 'leave_balance_deducted_on_approval', date: new Date().toISOString().slice(0, 10) });
+    }
     invalidateAttendanceCaches(company).catch(() => {});
     if (request.type === 'regularization') {
       invalidatePayrollCaches(company).catch(() => {});
@@ -1277,11 +1442,120 @@ async function createAttendanceRequest(req, res) {
   }
 }
 
+async function bulkAdjustLeaveBalances(req, res) {
+  try {
+    const company = requireCompany(req, res);
+    if (!company) return;
+    await connectMongo();
+
+    const { mode, leaveType, delta, reason, performedBy } = req.body || {};
+    const bulkMode = String(mode || 'delta').trim().toLowerCase();
+    const col = await getLeaveBalancesCol(company);
+    const historyCol = await getLeaveBalanceHistoryCol(company);
+    const employees = await getCompanyEmployeesForLeave(company);
+
+    if (!employees.length) {
+      return res.json({ success: true, message: 'No employees found', data: { updated: 0, skipped: 0 } });
+    }
+
+    const adjReason = typeof reason === 'string' ? reason.trim() : '';
+    const adjBy = typeof performedBy === 'string' ? performedBy.trim() : 'HR Admin';
+    const results = { updated: 0, skipped: 0, details: [] };
+
+    if (bulkMode === 'standard' || bulkMode === 'set_standard') {
+      const allocations = resolveBulkAllocations(req.body);
+
+      for (const emp of employees) {
+        const targets = [];
+        for (const leaveKey of BULK_ALLOCATION_KEYS) {
+          if (allocations[leaveKey] === undefined) continue;
+          if (leaveKey === 'Maternity Leave' && !isFemaleEmployee(emp.gender)) continue;
+          targets.push({ leaveKey, value: allocations[leaveKey] });
+        }
+
+        for (const { leaveKey, value } of targets) {
+          const r = await applyLeaveBalanceChange({
+            company,
+            employeeId: emp.employeeId,
+            leaveKey,
+            targetValue: value,
+            reason: adjReason || 'Standard annual leave allocation',
+            performedBy: adjBy,
+            col,
+            historyCol,
+          });
+          if (r.changed) results.updated += 1;
+        }
+      }
+
+      emitAttendanceChanged({ company, type: 'leave_balance_bulk_standard', date: new Date().toISOString().slice(0, 10) });
+
+      return res.json({
+        success: true,
+        message: `Standard allocation applied for ${employees.length} employee(s)`,
+        data: {
+          employees: employees.length,
+          changes: results.updated,
+          allocations,
+        },
+      });
+    }
+
+    const leaveKey = normalizeLeaveTypeKey(leaveType);
+    if (!leaveKey) return res.status(400).json({ success: false, error: 'leaveType is required' });
+
+    const inc = safeInt(delta, 0);
+    if (!inc) return res.status(400).json({ success: false, error: 'delta must be a non-zero number' });
+
+    for (const emp of employees) {
+      if (leaveKey === 'Maternity Leave' && !isFemaleEmployee(emp.gender)) {
+        results.skipped += 1;
+        continue;
+      }
+
+      const existing = await col.findOne({ company, employeeId: emp.employeeId }, { projection: { balances: 1 } });
+      const prevBalances = { ...DEFAULT_LEAVE_BALANCES, ...(existing?.balances || {}) };
+      const prevValue = safeInt(prevBalances[leaveKey], 0);
+      const nextValue = Math.max(0, prevValue + inc);
+
+      const r = await applyLeaveBalanceChange({
+        company,
+        employeeId: emp.employeeId,
+        leaveKey,
+        targetValue: nextValue,
+        reason: adjReason || `Bulk adjustment (${inc > 0 ? '+' : ''}${inc})`,
+        performedBy: adjBy,
+        col,
+        historyCol,
+      });
+      if (r.changed) results.updated += 1;
+    }
+
+    emitAttendanceChanged({ company, type: 'leave_balance_bulk_adjusted', date: new Date().toISOString().slice(0, 10) });
+
+    return res.json({
+      success: true,
+      message: `Bulk leave update applied`,
+      data: {
+        leaveType: leaveKey,
+        delta: inc,
+        employees: employees.length,
+        updated: results.updated,
+        skipped: results.skipped,
+      },
+    });
+  } catch (error) {
+    console.error('[hrms-portal] bulkAdjustLeaveBalances error:', error);
+    return res.status(500).json({ success: false, error: error.message || 'Internal server error' });
+  }
+}
+
 module.exports = {
   listLeaves,
   listLeaveBalances,
   getLeaveBalance,
   adjustLeaveBalance,
+  bulkAdjustLeaveBalances,
   getLeaveBalanceHistory,
   listAttendanceRequests,
   leaveOverviewStats,

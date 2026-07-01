@@ -1,6 +1,13 @@
 const { ObjectId } = require('mongodb');
 const { getUsersCollection, LOGIN_DB_NAME, getDb } = require('../../../config/mongo');
-const { isGraphMailConfigured, sendMail, normalizeEmailList } = require('../../../lib/microsoftGraphMail');
+const {
+  isGraphMailConfigured,
+  sendMail,
+  sendMailWithId,
+  replyAllToMessage,
+  normalizeEmailList,
+  getGraphConfig,
+} = require('../../../lib/microsoftGraphMail');
 const { normalizeCompany, companyQuery } = require('../../hrms/utils/hrmsContext');
 const { getRequestsCollection } = require('./attendanceRequestsService');
 
@@ -240,6 +247,11 @@ function getRequestTypeLabel(requestDoc) {
   return 'Attendance Request';
 }
 
+function formatRequestDurationLabel(requestDoc) {
+  if (requestDoc.type !== 'time-off') return null;
+  return requestDoc.halfDay ? 'Half day (0.5)' : 'Full day';
+}
+
 function buildRequestEmailHtml(requestDoc) {
   const name = requestDoc.employeeName || requestDoc.employeeId || 'Employee';
   const typeLabel = getRequestTypeLabel(requestDoc);
@@ -249,6 +261,8 @@ function buildRequestEmailHtml(requestDoc) {
   ];
 
   if (requestDoc.type === 'time-off') {
+    const duration = formatRequestDurationLabel(requestDoc);
+    if (duration) lines.push(`<p><strong>Duration:</strong> ${duration}</p>`);
     lines.push(`<p><strong>Date range:</strong> ${requestDoc.dateRange || '—'}</p>`);
     lines.push(`<p><strong>Reason:</strong> ${requestDoc.reason || '—'}</p>`);
   } else if (requestDoc.type === 'regularization') {
@@ -273,13 +287,148 @@ function buildRequestEmailHtml(requestDoc) {
 function buildRequestEmailSubject(requestDoc) {
   const name = requestDoc.employeeName || requestDoc.employeeId || 'Employee';
   const typeLabel = getRequestTypeLabel(requestDoc);
+  const durationSuffix =
+    requestDoc.type === 'time-off' && requestDoc.halfDay ? ' — Half day' : '';
   const detail =
     requestDoc.type === 'time-off'
       ? requestDoc.dateRange || ''
       : requestDoc.type === 'regularization' || requestDoc.type === 'on-duty'
         ? requestDoc.date || ''
         : '';
-  return `${typeLabel} — ${name}${detail ? ` (${detail})` : ''}`;
+  return `${typeLabel}${durationSuffix} — ${name}${detail ? ` (${detail})` : ''}`;
+}
+
+function buildDecisionEmailHtml(requestDoc, action, decidedByName, approverRole, { threaded = false } = {}) {
+  const act = action === 'approve' ? 'approved' : 'rejected';
+  const actTitle = action === 'approve' ? 'Approved' : 'Rejected';
+  const typeLabel = getRequestTypeLabel(requestDoc);
+  const role = String(approverRole || '').toLowerCase();
+  const decBy =
+    String(decidedByName || '').trim() ||
+    (role === 'hr' ? 'HR' : role === 'manager' ? 'Department Manager' : 'Manager/HR');
+  const name = requestDoc.employeeName || requestDoc.employeeId || 'Employee';
+
+  const intro = threaded
+    ? `<p><strong>${name}</strong>'s <strong>${typeLabel}</strong> request has been <strong>${act}</strong> by ${decBy}.</p>`
+    : `<p>Your <strong>${typeLabel}</strong> request has been <strong>${act}</strong> by ${decBy}.</p>`;
+
+  const lines = [intro, `<p><strong>Status:</strong> ${actTitle}</p>`];
+
+  if (requestDoc.type === 'time-off') {
+    const duration = formatRequestDurationLabel(requestDoc);
+    if (duration) lines.push(`<p><strong>Duration:</strong> ${duration}</p>`);
+    lines.push(`<p><strong>Date range:</strong> ${requestDoc.dateRange || '—'}</p>`);
+    if (requestDoc.reason) lines.push(`<p><strong>Reason:</strong> ${requestDoc.reason}</p>`);
+  } else if (requestDoc.type === 'regularization') {
+    lines.push(`<p><strong>Date:</strong> ${requestDoc.date || '—'}</p>`);
+    lines.push(`<p><strong>Time window:</strong> ${requestDoc.timeWindow || '—'}</p>`);
+  } else if (requestDoc.type === 'on-duty') {
+    lines.push(`<p><strong>Date:</strong> ${requestDoc.date || '—'}</p>`);
+    lines.push(`<p><strong>Location:</strong> ${requestDoc.location || '—'}</p>`);
+  }
+
+  if (action === 'reject' && requestDoc.rejectionReason) {
+    lines.push(`<p><strong>Rejection reason:</strong> ${requestDoc.rejectionReason}</p>`);
+  }
+
+  lines.push('<p>View your request status in the employee portal.</p>');
+  lines.push('<p>— Vectorlytics HRMS</p>');
+  return lines.join('\n');
+}
+
+function buildEmailThreadMessageId(requestId) {
+  const cfg = getGraphConfig();
+  const domain = (cfg?.senderEmail || 'mail.local').split('@')[1] || 'mail.local';
+  return `<hrms-request-${String(requestId)}@${domain}>`;
+}
+
+async function resolveStoredEmailRecipients(requestDoc, company) {
+  let toEmails = Array.isArray(requestDoc.emailTo) ? requestDoc.emailTo : [];
+  let ccEmails = Array.isArray(requestDoc.emailCc) ? requestDoc.emailCc : [];
+
+  if (!toEmails.length && requestDoc.employeeId) {
+    const resolved = await resolveDefaultRecipients({
+      employeeId: requestDoc.employeeId,
+      company,
+    });
+    toEmails = resolved.toEmails;
+    ccEmails = resolved.ccEmails;
+  }
+
+  return { toEmails, ccEmails };
+}
+
+async function sendThreadedDecisionMail({ requestDoc, company, html }) {
+  const usersCol = await getUsersCollection();
+  const applicant = await findApplicant(usersCol, company, requestDoc.employeeId);
+  const applicantEmail = applicant?.email ? [applicant.email] : [];
+  const { toEmails, ccEmails } = await resolveStoredEmailRecipients(requestDoc, company);
+
+  const to = normalizeEmailList([...toEmails, ...applicantEmail]);
+  const cc = normalizeEmailList(
+    ccEmails.filter((e) => !to.map((t) => t.toLowerCase()).includes(e.toLowerCase()))
+  );
+
+  if (!to.length && !cc.length) {
+    return { sent: false, reason: 'no_recipients' };
+  }
+
+  const subject = `Re: ${requestDoc.emailSubject || buildRequestEmailSubject(requestDoc)}`;
+
+  await sendMail({
+    to,
+    cc,
+    subject,
+    html,
+    internetMessageHeaders: [
+      { name: 'X-Vectorlytics-Request-Id', value: String(requestDoc._id) },
+    ],
+  });
+
+  return { sent: true, threaded: true, mode: 'reply_subject', to, cc };
+}
+
+async function sendDecisionEmail({ company, requestDoc, action, decidedByName, approverRole }) {
+  if (!isGraphMailConfigured()) {
+    return { skipped: true, reason: 'mail_not_configured' };
+  }
+
+  const threadedHtml = buildDecisionEmailHtml(requestDoc, action, decidedByName, approverRole, {
+    threaded: true,
+  });
+
+  const graphMessageId = requestDoc.graphMessageId || null;
+  if (graphMessageId) {
+    try {
+      await replyAllToMessage({ messageId: graphMessageId, html: threadedHtml });
+      return { sent: true, threaded: true, mode: 'reply_all' };
+    } catch (err) {
+      console.error('[sendDecisionEmail] replyAll failed, falling back to threaded sendMail:', err.message);
+    }
+  }
+
+  const threadedResult = await sendThreadedDecisionMail({ requestDoc, company, html: threadedHtml }).catch(
+    (err) => {
+      console.error('[sendDecisionEmail] threaded sendMail failed:', err.message);
+      return { sent: false, reason: err.message };
+    }
+  );
+  if (threadedResult.sent) {
+    return threadedResult;
+  }
+
+  const usersCol = await getUsersCollection();
+  const applicant = await findApplicant(usersCol, company, requestDoc.employeeId);
+  const applicantEmail = applicant?.email ? [applicant.email] : [];
+  if (!applicantEmail.length) {
+    return { skipped: true, reason: 'no_recipients' };
+  }
+
+  const directHtml = buildDecisionEmailHtml(requestDoc, action, decidedByName, approverRole);
+  const typeLabel = getRequestTypeLabel(requestDoc);
+  const actTitle = action === 'approve' ? 'Approved' : 'Rejected';
+  await sendMail({ to: applicantEmail, cc: [], subject: `${typeLabel} ${actTitle}`, html: directHtml });
+  return { sent: true, threaded: false, mode: 'direct' };
 }
 
 function mapRequestForResponse(req) {
@@ -326,8 +475,29 @@ async function sendRequestEmail({ requestId, company, to, cc, sentByUserId, sent
   const requestDoc = await getRequestById({ requestId, company });
   const subject = buildRequestEmailSubject(requestDoc);
   const html = buildRequestEmailHtml(requestDoc);
+  const emailThreadMessageId = buildEmailThreadMessageId(requestDoc._id);
 
-  await sendMail({ to: toList, cc: ccList, subject, html });
+  let graphMessageId = null;
+  let graphConversationId = null;
+  let mailMode = 'sendMail';
+
+  try {
+    const mailResult = await sendMailWithId({ to: toList, cc: ccList, subject, html });
+    graphMessageId = mailResult.messageId || null;
+    graphConversationId = mailResult.conversationId || null;
+    mailMode = 'sendMailWithId';
+  } catch (err) {
+    console.warn('[sendRequestEmail] sendMailWithId failed, using sendMail:', err.message);
+    await sendMail({
+      to: toList,
+      cc: ccList,
+      subject,
+      html,
+      internetMessageHeaders: [
+        { name: 'X-Vectorlytics-Request-Id', value: String(requestDoc._id) },
+      ],
+    });
+  }
 
   const col = await getRequestsCollection(company);
   const now = new Date();
@@ -348,13 +518,25 @@ async function sendRequestEmail({ requestId, company, to, cc, sentByUserId, sent
         emailSentAt: now,
         emailTo: toList,
         emailCc: ccList,
+        emailSubject: subject,
+        emailThreadMessageId,
+        graphMessageId,
+        graphConversationId,
+        emailMailMode: mailMode,
         updatedAt: now,
       },
       $push: { emailThread: threadEntry },
     }
   );
 
-  return { requestId: String(requestId), emailSentAt: now, emailTo: toList, emailCc: ccList };
+  return {
+    requestId: String(requestId),
+    emailSentAt: now,
+    emailTo: toList,
+    emailCc: ccList,
+    graphMessageId,
+    mailMode,
+  };
 }
 
 async function sendDefaultRequestEmail({ requestId, company, employeeId, sentByUserId, sentByName }) {
@@ -466,6 +648,7 @@ module.exports = {
   resolveDefaultRecipients,
   sendRequestEmail,
   sendDefaultRequestEmail,
+  sendDecisionEmail,
   addRequestReply,
   getRequestById,
   mapRequestForResponse,

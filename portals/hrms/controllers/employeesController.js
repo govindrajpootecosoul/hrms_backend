@@ -79,6 +79,7 @@ async function listEmployees(req, res) {
       joiningDate: emp.joiningDate || emp.createdAt || null,
       location: emp.location || '',
       payrollCompany: emp.payrollCompany || '',
+      gender: emp.gender || '',
       // IMPORTANT: Attendance APIs use `emp_code` as the biometric/employee code identifier.
       // Expose it as `biometricId` so UI filters (Absent/Present sets) match correctly.
       biometricId: emp.emp_code || emp.biometricId || emp.employeeId || emp.email?.split('@')[0] || ''

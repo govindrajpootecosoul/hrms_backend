@@ -8,6 +8,7 @@ router.get('/leaves/overview/utilization', c.leaveUtilization);
 // Leave balance allocation + history (HR-managed)
 router.get('/leave-balances', c.listLeaveBalances);
 router.get('/leave-balances/:employeeId', c.getLeaveBalance);
+router.post('/leave-balances/bulk-adjust', c.bulkAdjustLeaveBalances);
 router.post('/leave-balances/:employeeId/adjust', c.adjustLeaveBalance);
 router.get('/leave-balances/:employeeId/history', c.getLeaveBalanceHistory);
 router.get('/attendance-requests/stats', c.attendanceRequestStats);

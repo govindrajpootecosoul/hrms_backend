@@ -13,35 +13,114 @@ const {
 
 const LEAVE_BALANCES_COLLECTION = 'leave_balances';
 const DEFAULT_LEAVE_BALANCES = {
-  'Casual Leave': 4,
-  'Sick Leave': 3,
-  'Earned Leave': 5,
-  'Work From Home': 2,
-  'Compensatory Off': 1,
+  'Casual Leave': 0,
+  'Sick Leave': 0,
+  'Earned Leave': 0,
+  'Work From Home': 0,
+  'Compensatory Off': 0,
+  'Maternity Leave': 0,
   'LOP': 0,
 };
 
+function escapeRe(s) {
+  return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function normalizePortalCompany(value) {
+  if (value == null || value === '') return null;
+  const raw = String(value).trim();
+  if (!raw) return null;
+  const lc = raw.toLowerCase();
+  if (lc === '1' || lc === 'ecosoul' || lc === 'ecosoulhome' || lc === 'eco soul' || lc === 'ecosoul home') {
+    return 'Ecosoul Home';
+  }
+  if (lc === '2' || lc === 'thrive' || lc === 'thrive brands' || lc === 'thrivebrands') return 'Thrive';
+  return raw;
+}
+
+function buildLeaveCompanyClause(company) {
+  const normalized = normalizePortalCompany(company);
+  if (!normalized) return {};
+  const lc = normalized.toLowerCase();
+  if (lc === 'thrive') return { company: { $regex: /^thrive$/i } };
+  if (lc.includes('ecosoul') || lc.includes('eco soul')) return { company: { $regex: /ecosoul/i } };
+  return { company: normalized };
+}
+
+function isFemaleEmployee(gender) {
+  return String(gender || '').trim().toLowerCase() === 'female';
+}
+
+async function getEmployeeGenderForPortal(company, employeeId) {
+  const empId = String(employeeId || '').trim();
+  if (!company || !empId) return '';
+  const { getUsersCollection } = require('../../../config/mongo');
+  const usersCol = await getUsersCollection(null, company);
+  const companyClause = buildLeaveCompanyClause(company);
+  const emp = await usersCol.findOne(
+    {
+      ...companyClause,
+      $or: [
+        { employeeId: empId },
+        { employeeId: new RegExp(`^${escapeRe(empId)}$`, 'i') },
+        { email: new RegExp(`^${escapeRe(empId)}@`, 'i') },
+      ],
+    },
+    { projection: { gender: 1 } }
+  );
+  return emp?.gender || '';
+}
+
+function filterBalancesForGender(balances, gender) {
+  const b = { ...balances };
+  if (!isFemaleEmployee(gender)) {
+    b['Maternity Leave'] = 0;
+  }
+  return b;
+}
+
 async function getLeaveBalancesForEmployee({ company, employeeId }) {
-  if (!company || !employeeId) return { balances: { ...DEFAULT_LEAVE_BALANCES } };
+  if (!employeeId) {
+    return { balances: { ...DEFAULT_LEAVE_BALANCES }, gender: '' };
+  }
   await connectMongo();
   const db = await getEmployeePortalDb(company);
   const col = db.collection(LEAVE_BALANCES_COLLECTION);
-  const doc = await col.findOne({ company, employeeId }, { projection: { balances: 1 } });
-  return { balances: { ...DEFAULT_LEAVE_BALANCES, ...(doc?.balances || {}) } };
+  const empId = String(employeeId).trim();
+  const companyClause = buildLeaveCompanyClause(company);
+
+  const doc = await col.findOne(
+    {
+      ...companyClause,
+      $or: [
+        { employeeId: empId },
+        { employeeId: new RegExp(`^${escapeRe(empId)}$`, 'i') },
+      ],
+    },
+    { projection: { balances: 1, employeeId: 1 } }
+  );
+
+  const gender = company ? await getEmployeeGenderForPortal(company, empId) : '';
+  const balances = filterBalancesForGender(
+    { ...DEFAULT_LEAVE_BALANCES, ...(doc?.balances || {}) },
+    gender
+  );
+  return { balances, gender };
 }
 
-function balancesToList(balances) {
-  const b = balances || {};
-  return Object.keys(DEFAULT_LEAVE_BALANCES).map((type) => ({
-    type,
-    balance: Number.isFinite(Number(b[type])) ? Number(b[type]) : 0,
-  }));
+function balancesToList(balances, gender) {
+  const b = filterBalancesForGender(balances || {}, gender);
+  return Object.keys(DEFAULT_LEAVE_BALANCES)
+    .filter((type) => type !== 'Maternity Leave' || isFemaleEmployee(gender))
+    .map((type) => ({
+      type,
+      balance: Number.isFinite(Number(b[type])) ? Number(b[type]) : 0,
+    }));
 }
 
 function totalLeaveBalance(balances) {
   const b = balances || {};
-  // Exclude LOP from "available balance"
-  return ['Casual Leave', 'Sick Leave', 'Earned Leave', 'Work From Home', 'Compensatory Off'].reduce((sum, k) => {
+  return ['Casual Leave', 'Sick Leave', 'Earned Leave', 'Work From Home', 'Compensatory Off', 'Maternity Leave'].reduce((sum, k) => {
     const v = Number(b[k] || 0);
     return sum + (Number.isFinite(v) ? v : 0);
   }, 0);
@@ -53,7 +132,6 @@ async function getDashboard(req, res) {
     const company = getCompanyFromRequest(req);
     if (!company) return res.status(400).json({ success: false, error: 'company is required' });
     const doc = await getOrCreateDoc(PORTAL_DASHBOARD, { employeeId }, defaultDashboard(employeeId), company);
-    // Best-effort: populate live leave balance in quickStats when available.
     try {
       const { balances } = await getLeaveBalancesForEmployee({ company, employeeId });
       doc.quickStats = doc.quickStats || {};
@@ -72,10 +150,10 @@ async function getAttendance(req, res) {
     const company = getCompanyFromRequest(req);
     if (!company) return res.status(400).json({ success: false, error: 'company is required' });
     const doc = await getOrCreateDoc(PORTAL_ATTENDANCE, { employeeId }, defaultAttendance(employeeId), company);
-    // Provide leaveBalance for UI (Employee Attendance page reads this).
     try {
-      const { balances } = await getLeaveBalancesForEmployee({ company, employeeId });
+      const { balances, gender } = await getLeaveBalancesForEmployee({ company, employeeId });
       doc.leaveBalance = totalLeaveBalance(balances);
+      doc.leaveBalances = balancesToList(balances, gender);
     } catch {}
     return res.json({ success: true, data: doc });
   } catch (err) {
@@ -90,10 +168,9 @@ async function getRequests(req, res) {
     const company = getCompanyFromRequest(req);
     if (!company) return res.status(400).json({ success: false, error: 'company is required' });
     const doc = await getOrCreateDoc(PORTAL_REQUESTS, { employeeId }, defaultRequests(employeeId), company);
-    // Replace static balances with HR-managed balances when available.
     try {
-      const { balances } = await getLeaveBalancesForEmployee({ company, employeeId });
-      doc.leaveBalances = balancesToList(balances);
+      const { balances, gender } = await getLeaveBalancesForEmployee({ company, employeeId });
+      doc.leaveBalances = balancesToList(balances, gender);
     } catch {}
     return res.json({ success: true, data: doc });
   } catch (err) {
