@@ -593,12 +593,40 @@ async function listAttendanceRequests(req, res) {
       .sort({ submittedAt: -1 })
       .toArray();
 
+    const usersCol = await getUsersCollection(null, company);
+    const employees = await usersCol
+      .find({ company })
+      .project({ employeeId: 1, email: 1, name: 1, firstName: 1, department: 1 })
+      .toArray();
+
+    const employeeMap = new Map();
+    employees.forEach((emp) => {
+      const empId = String(emp.employeeId || emp.email?.split('@')[0] || '').trim();
+      if (!empId) return;
+      const info = {
+        name: emp.name || emp.firstName || '',
+        department: emp.department || '',
+      };
+      employeeMap.set(empId, info);
+      employeeMap.set(empId.toUpperCase(), info);
+    });
+
+    const resolveEmployeeInfo = (req) => {
+      const empId = String(req.employeeId || '').trim();
+      const fromMap = employeeMap.get(empId) || employeeMap.get(empId.toUpperCase()) || {};
+      return {
+        employeeName: req.employeeName || fromMap.name || '',
+        employeeDepartment: req.employeeDepartment || fromMap.department || '',
+      };
+    };
+
     res.json({
       success: true,
       data: {
         requests: requests.map(req => ({
           id: req._id.toString(),
           employeeId: req.employeeId,
+          ...resolveEmployeeInfo(req),
           type: req.type,
           status: req.status,
           submittedAt: req.submittedAt,
@@ -610,6 +638,7 @@ async function listAttendanceRequests(req, res) {
           dateRange: req.dateRange,
           reason: req.reason,
           leaveType: req.leaveType || null, // Include leave type if available
+          halfDay: Boolean(req.halfDay),
           approvedAt: req.approvedAt,
           rejectedAt: req.rejectedAt,
           approvedBy: req.approvedBy,
