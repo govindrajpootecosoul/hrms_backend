@@ -10,6 +10,8 @@ const { networkConfig, backendPort } = require('./config/network.config');
 const { getCorsOptions } = require('./config/cors.config');
 const { subscribeAttendanceEvents } = require('./lib/attendanceEvents');
 const { initRedis } = require('./lib/responseCache');
+const { startAttendanceReminderScheduler } = require('./lib/attendanceReminderScheduler');
+const { ensureReminderLogIndexes } = require('./portals/employee/services/attendanceReminderService');
 
 initRedis().catch(() => {});
 
@@ -132,8 +134,15 @@ async function startServer() {
     console.error('⚠️  MongoDB connection warning:', err.message);
     console.log('   Server will start, but MongoDB features may not work until connection is established');
   }
-  
-  // Query Tracker: mongoose connects per company in middleware (no global DB at startup).
+
+  if (process.env.ATTENDANCE_REMINDER_CRON === 'true') {
+    try {
+      await ensureReminderLogIndexes();
+    } catch (idxErr) {
+      console.error('[attendanceReminder] index setup warning:', idxErr.message);
+    }
+    startAttendanceReminderScheduler();
+  }
 
   // Start server
   // Listen on all interfaces (0.0.0.0) to allow network access

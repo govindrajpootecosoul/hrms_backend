@@ -109,15 +109,32 @@ async function getCompanyEmployeesForLeave(company) {
   const usersCol = await getUsersCollection(null, company);
   const employees = await usersCol
     .find({ company })
-    .project({ employeeId: 1, email: 1, gender: 1, name: 1 })
+    .project({ employeeId: 1, email: 1, gender: 1, name: 1, firstName: 1 })
     .toArray();
   return employees
     .map((emp) => ({
       employeeId: String(emp.employeeId || emp.email?.split('@')[0] || '').trim(),
       gender: emp.gender || '',
-      name: emp.name || '',
+      name: emp.name || emp.firstName || '',
+      email: emp.email || '',
     }))
     .filter((e) => e.employeeId);
+}
+
+async function syncLeaveBalanceEmployeeMeta({ company, employeeId, employeeName, employeeEmail, col }) {
+  const now = new Date();
+  await col.updateOne(
+    { company, employeeId },
+    {
+      $set: {
+        employeeName: String(employeeName || '').trim(),
+        employeeEmail: String(employeeEmail || '').trim(),
+        updatedAt: now,
+      },
+      $setOnInsert: { company, employeeId, createdAt: now },
+    },
+    { upsert: true }
+  );
 }
 
 async function applyLeaveBalanceChange({
@@ -129,13 +146,31 @@ async function applyLeaveBalanceChange({
   performedBy,
   col,
   historyCol,
+  employeeName,
+  employeeEmail,
 }) {
   const existing = await col.findOne({ company, employeeId }, { projection: { balances: 1 } });
   const prevBalances = { ...DEFAULT_LEAVE_BALANCES, ...(existing?.balances || {}) };
   const prevValue = safeInt(prevBalances[leaveKey], 0);
   const nextValue = Math.max(0, safeInt(targetValue, 0));
   const appliedDelta = nextValue - prevValue;
+
+  const profileSet = {};
+  if (employeeName !== undefined) profileSet.employeeName = String(employeeName || '').trim();
+  if (employeeEmail !== undefined) profileSet.employeeEmail = String(employeeEmail || '').trim();
+
   if (appliedDelta === 0) {
+    if (Object.keys(profileSet).length) {
+      const now = new Date();
+      await col.updateOne(
+        { company, employeeId },
+        {
+          $set: { ...profileSet, updatedAt: now },
+          $setOnInsert: { company, employeeId, createdAt: now },
+        },
+        { upsert: true }
+      );
+    }
     return { changed: false, employeeId, leaveType: leaveKey, previous: prevValue, next: nextValue, delta: 0 };
   }
 
@@ -143,7 +178,7 @@ async function applyLeaveBalanceChange({
   await col.updateOne(
     { company, employeeId },
     {
-      $set: { updatedAt: now },
+      $set: { ...profileSet, updatedAt: now },
       $setOnInsert: { company, employeeId, createdAt: now },
       $inc: { [`balances.${leaveKey}`]: appliedDelta },
     },
@@ -401,6 +436,8 @@ async function listLeaveBalances(req, res) {
     const data = rows.map((r) => ({
       id: r._id?.toString?.() || String(r._id),
       employeeId: r.employeeId,
+      employeeName: r.employeeName || '',
+      employeeEmail: r.employeeEmail || '',
       balances: { ...DEFAULT_LEAVE_BALANCES, ...(r.balances || {}) },
       updatedAt: r.updatedAt || r.createdAt || null,
       company: r.company,
@@ -1495,6 +1532,14 @@ async function bulkAdjustLeaveBalances(req, res) {
       const allocations = resolveBulkAllocations(req.body);
 
       for (const emp of employees) {
+        await syncLeaveBalanceEmployeeMeta({
+          company,
+          employeeId: emp.employeeId,
+          employeeName: emp.name,
+          employeeEmail: emp.email,
+          col,
+        });
+
         const targets = [];
         for (const leaveKey of BULK_ALLOCATION_KEYS) {
           if (allocations[leaveKey] === undefined) continue;
@@ -1512,6 +1557,8 @@ async function bulkAdjustLeaveBalances(req, res) {
             performedBy: adjBy,
             col,
             historyCol,
+            employeeName: emp.name,
+            employeeEmail: emp.email,
           });
           if (r.changed) results.updated += 1;
         }
@@ -1542,6 +1589,14 @@ async function bulkAdjustLeaveBalances(req, res) {
         continue;
       }
 
+      await syncLeaveBalanceEmployeeMeta({
+        company,
+        employeeId: emp.employeeId,
+        employeeName: emp.name,
+        employeeEmail: emp.email,
+        col,
+      });
+
       const existing = await col.findOne({ company, employeeId: emp.employeeId }, { projection: { balances: 1 } });
       const prevBalances = { ...DEFAULT_LEAVE_BALANCES, ...(existing?.balances || {}) };
       const prevValue = safeInt(prevBalances[leaveKey], 0);
@@ -1556,6 +1611,8 @@ async function bulkAdjustLeaveBalances(req, res) {
         performedBy: adjBy,
         col,
         historyCol,
+        employeeName: emp.name,
+        employeeEmail: emp.email,
       });
       if (r.changed) results.updated += 1;
     }

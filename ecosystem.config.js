@@ -44,6 +44,25 @@ module.exports = {
       autorestart: true,
       watch: false,
       max_memory_restart: '1G'
+    },
+    {
+      name: 'HRMS-attendance-reminders',
+      script: './scripts/attendance-reminder-daemon.js',
+      cwd: path.resolve(__dirname),
+      instances: 1,
+      exec_mode: 'fork',
+      env_production: {
+        NODE_ENV: 'production',
+        ATTENDANCE_REMINDER_CRON: 'true'
+      },
+      error_file: './logs/attendance-reminder-err.log',
+      out_file: './logs/attendance-reminder-out.log',
+      log_file: './logs/attendance-reminder-combined.log',
+      time: true,
+      merge_logs: true,
+      autorestart: true,
+      watch: false,
+      max_memory_restart: '256M'
     }
   ]
 };
