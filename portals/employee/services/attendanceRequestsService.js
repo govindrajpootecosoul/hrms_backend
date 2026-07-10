@@ -1,7 +1,7 @@
 const { getDb, getEmployeePortalDb, getUsersCollection, LOGIN_DB_NAME } = require('../../../config/mongo');
 const { ATTENDANCE_REQUESTS } = require('../models');
 const { emitAttendanceChanged } = require('../../../lib/attendanceEvents');
-const { validateTimeOffBalance, deductTimeOffOnApproval } = require('../../../lib/leaveBalanceService');
+const { validateTimeOffBalance, deductTimeOffOnApproval, normalizeLeaveTypeKey } = require('../../../lib/leaveBalanceService');
 const { validateLeaveWfhSingleDate, validateLeaveWfhDateRange } = require('../../../lib/leaveRequestDateWindow');
 const { ObjectId } = require('mongodb');
 const { normalizeCompany, companyQuery } = require('../../hrms/utils/hrmsContext');
@@ -109,6 +109,15 @@ function rangesOverlap(a, b) {
   return Boolean(a && b && a.start <= b.end && b.start <= a.end);
 }
 
+const ALLOWED_TIME_OFF_LEAVE_KEYS = new Set(['Casual Leave', 'Work From Home']);
+
+function canonicalLeaveTypeLabel(leaveType) {
+  const key = normalizeLeaveTypeKey(leaveType);
+  if (key === 'Casual Leave') return 'Leave';
+  if (key === 'Work From Home') return 'Work From Home';
+  return String(leaveType || '').trim() || 'Leave';
+}
+
 async function ensureNoDuplicateRequest({ col, employeeId, type, date, dateRange, leaveType }) {
   const activeStatuses = ['pending', 'approved'];
 
@@ -128,25 +137,61 @@ async function ensureNoDuplicateRequest({ col, employeeId, type, date, dateRange
   }
 
   if (type === 'time-off') {
-    const lt = String(leaveType || 'Time Off').trim();
-    const requested = parseDateRangeString(dateRange);
-    if (!requested) return; // fall back to old behavior if format unknown
+    const requestedKey = normalizeLeaveTypeKey(leaveType);
+    if (!requestedKey || !ALLOWED_TIME_OFF_LEAVE_KEYS.has(requestedKey)) {
+      const err = new Error('Invalid leave type. Only Leave and Work From Home are allowed.');
+      err.statusCode = 400;
+      throw err;
+    }
 
-    const existing = await col
+    const requested = parseDateRangeString(dateRange);
+    if (!requested) return;
+
+    const existingTimeOff = await col
       .find({
         employeeId,
         type: 'time-off',
-        leaveType: lt,
         status: { $in: activeStatuses },
       })
-      .project({ dateRange: 1 })
+      .project({ dateRange: 1, leaveType: 1 })
       .toArray();
 
-    const overlap = existing.some((r) => rangesOverlap(parseDateRangeString(r.dateRange), requested));
+    const overlap = existingTimeOff.some((r) => {
+      const existingKey = normalizeLeaveTypeKey(r.leaveType);
+      if (existingKey !== requestedKey) return false;
+      return rangesOverlap(parseDateRangeString(r.dateRange), requested);
+    });
+
     if (overlap) {
       const err = new Error('You have already applied leave for this date.');
       err.statusCode = 400;
       throw err;
+    }
+
+    if (requestedKey === 'Work From Home') {
+      const existingOnDuty = await col
+        .find({
+          employeeId,
+          type: 'on-duty',
+          status: { $in: activeStatuses },
+        })
+        .project({ date: 1 })
+        .toArray();
+
+      const onDutyOverlap = existingOnDuty.some((r) => {
+        const d = parseYyyyMmDd(r.date);
+        if (!d) return false;
+        d.setUTCHours(0, 0, 0, 0);
+        const dayEnd = new Date(d);
+        dayEnd.setUTCHours(23, 59, 59, 999);
+        return rangesOverlap({ start: d, end: dayEnd }, requested);
+      });
+
+      if (onDutyOverlap) {
+        const err = new Error('You have already applied WFH for this date.');
+        err.statusCode = 400;
+        throw err;
+      }
     }
   }
 }
@@ -161,7 +206,7 @@ function validateType(type) {
 }
 
 function validateFields(type, body) {
-  const { date, timeWindow, location, dateRange, reason } = body;
+  const { date, timeWindow, location, dateRange, reason, leaveType } = body;
   if (type === 'regularization' && (!date || !timeWindow)) {
     const err = new Error('Date and time window are required for regularization');
     err.statusCode = 400;
@@ -181,6 +226,17 @@ function validateFields(type, body) {
     }
   }
   if (type === 'time-off') {
+    if (!leaveType || !String(leaveType).trim()) {
+      const err = new Error('Leave type is required');
+      err.statusCode = 400;
+      throw err;
+    }
+    const leaveKey = normalizeLeaveTypeKey(leaveType);
+    if (!leaveKey || !ALLOWED_TIME_OFF_LEAVE_KEYS.has(leaveKey)) {
+      const err = new Error('Invalid leave type. Only Leave and Work From Home are allowed.');
+      err.statusCode = 400;
+      throw err;
+    }
     if (!dateRange || !reason) {
       const err = new Error('Date range and reason are required for time-off request');
       err.statusCode = 400;
@@ -221,10 +277,11 @@ async function submitRequest({ employeeId, company, body }) {
   });
 
   if (type === 'time-off') {
+    const normalizedLeaveType = canonicalLeaveTypeLabel(leaveType);
     const balanceCheck = await validateTimeOffBalance({
       company,
       employeeId,
-      leaveType: leaveType || 'Time Off',
+      leaveType: normalizedLeaveType,
       dateRange,
       halfDay: Boolean(halfDay),
     });
@@ -256,7 +313,7 @@ async function submitRequest({ employeeId, company, body }) {
     ...(type === 'time-off' && {
       dateRange,
       reason: reason || '',
-      leaveType: leaveType || 'Time Off',
+      leaveType: canonicalLeaveTypeLabel(leaveType),
       halfDay: Boolean(halfDay),
     }),
     createdAt: new Date(),

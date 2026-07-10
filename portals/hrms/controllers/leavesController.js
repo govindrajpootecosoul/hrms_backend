@@ -28,22 +28,12 @@ const DEFAULT_LEAVE_BALANCES = {
 
 const STANDARD_LEAVE_ALLOCATIONS = {
   'Casual Leave': 12,
-  'Sick Leave': 0,
-  'Earned Leave': 0,
   'Work From Home': 15,
-  'Compensatory Off': 0,
-  'Maternity Leave': 182,
-  'LOP': 0,
 };
 
 const BULK_ALLOCATION_KEYS = [
   'Casual Leave',
-  'Sick Leave',
-  'Earned Leave',
   'Work From Home',
-  'Compensatory Off',
-  'Maternity Leave',
-  'LOP',
 ];
 
 function normalizeLeaveTypeKey(leaveType) {
@@ -57,8 +47,9 @@ function normalizeLeaveTypeKey(leaveType) {
   if (map.has(cleaned)) return map.get(cleaned);
   if (cleaned === 'loss of pay') return 'LOP';
   if (cleaned === 'comp off' || cleaned === 'compoff') return 'Compensatory Off';
-  if (cleaned === 'wfh') return 'Work From Home';
+  if (cleaned === 'wfh' || cleaned === 'work from home') return 'Work From Home';
   if (cleaned === 'maternity leave' || cleaned === 'maternity') return 'Maternity Leave';
+  if (cleaned === 'time off' || cleaned === 'leave') return 'Casual Leave';
   return raw; // allow custom types without blocking
 }
 
