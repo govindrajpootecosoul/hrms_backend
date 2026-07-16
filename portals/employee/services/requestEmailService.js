@@ -243,7 +243,7 @@ function getRequestTypeLabel(requestDoc) {
   if (requestDoc.type === 'regularization') return 'Attendance Regularization';
   if (requestDoc.type === 'on-duty') return 'Work From Home';
   if (requestDoc.type === 'time-off' && requestDoc.leaveType === 'Work From Home') return 'Work From Home';
-  if (requestDoc.type === 'time-off') return `Leave (${requestDoc.leaveType || 'Time Off'})`;
+  if (requestDoc.type === 'time-off') return 'Leave';
   return 'Attendance Request';
 }
 

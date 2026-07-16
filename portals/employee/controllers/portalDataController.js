@@ -110,20 +110,23 @@ async function getLeaveBalancesForEmployee({ company, employeeId }) {
 
 function balancesToList(balances, gender) {
   const b = filterBalancesForGender(balances || {}, gender);
-  return Object.keys(DEFAULT_LEAVE_BALANCES)
-    .filter((type) => type !== 'Maternity Leave' || isFemaleEmployee(gender))
-    .map((type) => ({
-      type,
-      balance: Number.isFinite(Number(b[type])) ? Number(b[type]) : 0,
-    }));
+  return [
+    {
+      type: 'Leave',
+      balance: Number.isFinite(Number(b['Casual Leave'])) ? Number(b['Casual Leave']) : 0,
+    },
+    {
+      type: 'Work From Home',
+      balance: Number.isFinite(Number(b['Work From Home'])) ? Number(b['Work From Home']) : 0,
+    },
+  ];
 }
 
 function totalLeaveBalance(balances) {
   const b = balances || {};
-  return ['Casual Leave', 'Sick Leave', 'Earned Leave', 'Work From Home', 'Compensatory Off', 'Maternity Leave'].reduce((sum, k) => {
-    const v = Number(b[k] || 0);
-    return sum + (Number.isFinite(v) ? v : 0);
-  }, 0);
+  const leave = Number(b['Casual Leave'] || 0);
+  const wfh = Number(b['Work From Home'] || 0);
+  return (Number.isFinite(leave) ? leave : 0) + (Number.isFinite(wfh) ? wfh : 0);
 }
 
 async function getDashboard(req, res) {

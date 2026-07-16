@@ -13,6 +13,7 @@ const {
 const { emitAttendanceChanged } = require('../../../lib/attendanceEvents');
 const { invalidateAttendanceCaches, invalidatePayrollCaches } = require('../../../lib/cacheInvalidation');
 const { deductTimeOffOnApproval } = require('../../../lib/leaveBalanceService');
+const leaveWfhDetailsService = require('../../../lib/leaveWfhDetailsService');
 
 const LEAVE_BALANCES_COLLECTION = 'leave_balances';
 const LEAVE_BALANCE_HISTORY_COLLECTION = 'leave_balance_history';
@@ -1627,6 +1628,60 @@ async function bulkAdjustLeaveBalances(req, res) {
   }
 }
 
+async function getLeaveWfhDetails(req, res) {
+  try {
+    const company = requireCompany(req, res);
+    if (!company) return;
+
+    const year = Number(req.query.year) || new Date().getFullYear();
+    if (!Number.isFinite(year) || year < 2000 || year > 2100) {
+      return res.status(400).json({ success: false, error: 'Invalid year' });
+    }
+
+    const monthRaw = req.query.month;
+    if (monthRaw !== undefined && monthRaw !== null && String(monthRaw).trim() !== '') {
+      const month = Number(monthRaw);
+      if (!Number.isFinite(month) || month < 1 || month > 12) {
+        return res.status(400).json({ success: false, error: 'month must be 1–12' });
+      }
+      const data = await leaveWfhDetailsService.getMonthlyDetails({ company, year, month });
+      return res.json({ success: true, data });
+    }
+
+    const data = await leaveWfhDetailsService.getYearlySummary({ company, year });
+    return res.json({ success: true, data });
+  } catch (error) {
+    console.error('[hrms-portal] getLeaveWfhDetails error:', error);
+    return res.status(500).json({ success: false, error: error.message || 'Internal server error' });
+  }
+}
+
+async function setLeaveWfhDay(req, res) {
+  try {
+    const company = requireCompany(req, res);
+    if (!company) return;
+
+    const { employeeId, date, code, reason, performedBy } = req.body || {};
+    const result = await leaveWfhDetailsService.setDayEntry({
+      company,
+      employeeId,
+      date,
+      code,
+      reason: typeof reason === 'string' ? reason : '',
+      performedBy: typeof performedBy === 'string' && performedBy.trim() ? performedBy.trim() : 'HR',
+    });
+
+    if (!result.ok) {
+      return res.status(400).json({ success: false, error: result.error || 'Failed to update day' });
+    }
+
+    return res.json({ success: true, data: result });
+  } catch (error) {
+    console.error('[hrms-portal] setLeaveWfhDay error:', error);
+    return res.status(500).json({ success: false, error: error.message || 'Internal server error' });
+  }
+}
+
 module.exports = {
   listLeaves,
   listLeaveBalances,
@@ -1643,4 +1698,6 @@ module.exports = {
   updateAttendanceRequest,
   deleteAttendanceRequest,
   createAttendanceRequest,
+  getLeaveWfhDetails,
+  setLeaveWfhDay,
 };

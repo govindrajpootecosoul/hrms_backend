@@ -60,7 +60,7 @@ const defaultAttendance = (employeeId = 'default') => ({
 const defaultRequests = (employeeId = 'default') => ({
   employeeId,
   leaveBalances: [
-    { type: 'Casual Leave', balance: 4 },
+    { type: 'Leave', balance: 4 },
     { type: 'Sick Leave', balance: 3 },
     { type: 'Earned Leave', balance: 5 },
     { type: 'Work From Home', balance: 2 },

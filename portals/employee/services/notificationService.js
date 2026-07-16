@@ -71,7 +71,7 @@ function getMessageForRequest(requestDoc, applicantName) {
     if (requestDoc.leaveType === 'Work From Home') {
       return `${name} has requested Work From Home${duration}.`;
     }
-    return `${name} has requested Leave (${requestDoc.leaveType || 'Time Off'})${duration}.`;
+    return `${name} has requested Leave${duration}.`;
   } else if (type === 'regularization') {
     return `${name} has requested Attendance Regularization for ${requestDoc.date || 'specified date'}.`;
   }
@@ -93,7 +93,7 @@ function getDecisionMessage(requestDoc, action, decidedByName, approverRole) {
     if (requestDoc.leaveType === 'Work From Home') {
       return `Your Work From Home request has been ${act} by ${decBy}.${duration}`;
     }
-    return `Your Leave request (${requestDoc.leaveType || 'Time Off'}) has been ${act} by ${decBy}.${duration}`;
+    return `Your Leave request has been ${act} by ${decBy}.${duration}`;
   } else if (type === 'regularization') {
     return `Your Attendance Regularization request for ${requestDoc.date || 'specified date'} has been ${act} by ${decBy}.`;
   }

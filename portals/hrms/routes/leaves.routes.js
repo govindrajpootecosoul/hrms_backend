@@ -11,6 +11,8 @@ router.get('/leave-balances/:employeeId', c.getLeaveBalance);
 router.post('/leave-balances/bulk-adjust', c.bulkAdjustLeaveBalances);
 router.post('/leave-balances/:employeeId/adjust', c.adjustLeaveBalance);
 router.get('/leave-balances/:employeeId/history', c.getLeaveBalanceHistory);
+router.get('/leave-wfh-details', c.getLeaveWfhDetails);
+router.put('/leave-wfh-details/day', c.setLeaveWfhDay);
 router.get('/attendance-requests/stats', c.attendanceRequestStats);
 router.post('/attendance-requests/:requestId/approve', c.approveAttendanceRequest);
 router.post('/attendance-requests/:requestId/reject', c.rejectAttendanceRequest);

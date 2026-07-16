@@ -11,12 +11,63 @@ const { getDb, LOGIN_DB_NAME } = require('../../../config/mongo');
 const responseCache = require('../../../lib/responseCache');
 const { storedCheckTimeToDate } = require('../../../lib/checkinTimeFormat');
 
-/** `dateRange` may be Date, object, or string — .split only exists on strings */
+/** `dateRange` may be Date, object, or string — supports "YYYY-MM-DD - YYYY-MM-DD" and "… to …" */
 function splitDateRangeParts(dateRange) {
   if (dateRange == null || dateRange === '') return null;
-  const s = typeof dateRange === 'string' ? dateRange : String(dateRange);
-  const parts = s.split(' - ');
-  return parts.length === 2 ? parts : null;
+  const s = typeof dateRange === 'string' ? dateRange.trim() : String(dateRange).trim();
+  if (!s) return null;
+  if (s.includes(' - ')) {
+    const parts = s.split(' - ');
+    return parts.length === 2 ? parts : null;
+  }
+  if (/ to /i.test(s)) {
+    const parts = s.split(/ to /i);
+    return parts.length === 2 ? parts : null;
+  }
+  return null;
+}
+
+/** Approved WFH is stored as attendance_requests type=time-off + leaveType Work From Home (not type=wfh). */
+function isWfhLeaveType(leaveType) {
+  const t = String(leaveType || '').trim().toLowerCase();
+  return t === 'work from home' || t === 'wfh';
+}
+
+function isLeaveTimeOffType(leaveType) {
+  // Any approved time-off that is not WFH counts as On Leave for KPIs
+  return !isWfhLeaveType(leaveType);
+}
+
+/** Mongo filter: approved WFH requests (current schema + legacy type values). */
+function approvedWfhRequestsQuery(companyName) {
+  return {
+    status: 'approved',
+    ...(companyName ? { company: companyName } : {}),
+    $or: [
+      {
+        type: 'time-off',
+        leaveType: { $regex: /^(work from home|wfh)$/i },
+      },
+      {
+        type: { $in: ['wfh', 'WFH', 'work-from-home', 'work from home'] },
+      },
+    ],
+  };
+}
+
+/** Mongo filter: approved leave (time-off) excluding WFH. */
+function approvedLeaveRequestsQuery(companyName) {
+  return {
+    type: 'time-off',
+    status: 'approved',
+    ...(companyName ? { company: companyName } : {}),
+    $or: [
+      { leaveType: { $exists: false } },
+      { leaveType: null },
+      { leaveType: '' },
+      { leaveType: { $not: { $regex: /^(work from home|wfh)$/i } } },
+    ],
+  };
 }
 
 /** Express can give string[] for duplicate query keys — use first value */
@@ -208,18 +259,10 @@ async function listAttendanceForRange(req, res, range) {
 
     const requestsCol = db.collection('attendance_requests');
     const approvedLeaves = await requestsCol
-      .find({
-        type: 'time-off',
-        status: 'approved',
-        ...(companyName ? { company: companyName } : {}),
-      })
+      .find(approvedLeaveRequestsQuery(companyName))
       .toArray();
     const wfhRequests = await requestsCol
-      .find({
-        type: { $in: ['wfh', 'WFH', 'work-from-home', 'work from home'] },
-        status: 'approved',
-        ...(companyName ? { company: companyName } : {}),
-      })
+      .find(approvedWfhRequestsQuery(companyName))
       .toArray();
 
     const allRecords = [];
@@ -765,15 +808,10 @@ async function listAttendance(req, res) {
       const onLeaveEmployees = new Set();
       const approvedLeaves =
         prefetch?.approvedLeaves ||
-        (await requestsCol
-          .find({
-            type: 'time-off',
-            status: 'approved',
-            ...(companyName ? { company: companyName } : {}),
-          })
-          .toArray());
+        (await requestsCol.find(approvedLeaveRequestsQuery(companyName)).toArray());
 
       approvedLeaves.forEach((leave) => {
+        if (!isLeaveTimeOffType(leave.leaveType)) return;
         const parts = splitDateRangeParts(leave.dateRange);
         if (!parts) return;
         try {
@@ -815,13 +853,7 @@ async function listAttendance(req, res) {
       const wfhFromRequests = new Set();
       const wfhRequests =
         prefetch?.wfhRequests ||
-        (await requestsCol
-          .find({
-            type: { $in: ['wfh', 'WFH', 'work-from-home', 'work from home'] },
-            status: 'approved',
-            ...(companyName ? { company: companyName } : {}),
-          })
-          .toArray());
+        (await requestsCol.find(approvedWfhRequestsQuery(companyName)).toArray());
 
       wfhRequests.forEach((wfhReq) => {
         const wfhParts = splitDateRangeParts(wfhReq.dateRange);
@@ -1122,20 +1154,15 @@ async function attendanceStats(req, res) {
       console.warn('[attendance/stats] Machine attendance merge skipped:', e.message);
     }
 
-    // Get approved leave requests for today
+    // Get approved leave requests for today (time-off excluding WFH)
     const requestsCol = db.collection('attendance_requests');
     const todayDateStr = date; // Format: YYYY-MM-DD
     
-    // Get approved time-off requests that overlap with today
-    const approvedLeaveQuery = {
-      type: 'time-off',
-      status: 'approved',
-      ...(companyName ? { company: companyName } : {})
-    };
-    const approvedLeaves = await requestsCol.find(approvedLeaveQuery).toArray();
+    const approvedLeaves = await requestsCol.find(approvedLeaveRequestsQuery(companyName)).toArray();
     
     const onLeaveEmployees = new Set();
     approvedLeaves.forEach(leave => {
+      if (!isLeaveTimeOffType(leave.leaveType)) return;
       const rangeParts = splitDateRangeParts(leave.dateRange);
       if (rangeParts) {
         const parts = rangeParts;
@@ -1230,13 +1257,8 @@ async function attendanceStats(req, res) {
       }
     });
     
-    // Also check for approved WFH requests
-    const wfhRequestsQuery = {
-      type: { $in: ['wfh', 'WFH', 'work-from-home', 'work from home'] },
-      status: 'approved',
-      ...(companyName ? { company: companyName } : {})
-    };
-    const wfhRequests = await requestsCol.find(wfhRequestsQuery).toArray();
+    // Also check for approved WFH requests (time-off + leaveType Work From Home)
+    const wfhRequests = await requestsCol.find(approvedWfhRequestsQuery(companyName)).toArray();
     wfhRequests.forEach((wfhReq) => {
       const wfhParts = splitDateRangeParts(wfhReq.dateRange);
       if (wfhParts) {
@@ -1585,9 +1607,10 @@ async function attendanceStatsByDepartment(req, res) {
     };
 
     const approvedLeaves = await requestsCol
-      .find({ type: 'time-off', status: 'approved', ...(companyName ? { company: companyName } : {}) })
+      .find(approvedLeaveRequestsQuery(companyName))
       .toArray();
     for (const leave of approvedLeaves) {
+      if (!isLeaveTimeOffType(leave.leaveType)) continue;
       const rangeParts = splitDateRangeParts(leave.dateRange);
       if (!rangeParts) continue;
       try {
@@ -1611,11 +1634,7 @@ async function attendanceStatsByDepartment(req, res) {
     }
 
     const wfhRequests = await requestsCol
-      .find({
-        type: { $in: ['wfh', 'WFH', 'work-from-home', 'work from home'] },
-        status: 'approved',
-        ...(companyName ? { company: companyName } : {}),
-      })
+      .find(approvedWfhRequestsQuery(companyName))
       .toArray();
     for (const req0 of wfhRequests) {
       const parts = splitDateRangeParts(req0.dateRange);
@@ -1814,14 +1833,10 @@ async function attendanceStatsTrends(req, res) {
 
     // Preload approved leave + wfh requests once, filter per day.
     const approvedLeaves = await requestsCol
-      .find({ type: 'time-off', status: 'approved', ...(companyName ? { company: companyName } : {}) })
+      .find(approvedLeaveRequestsQuery(companyName))
       .toArray();
     const approvedWfh = await requestsCol
-      .find({
-        type: { $in: ['wfh', 'WFH', 'work-from-home', 'work from home'] },
-        status: 'approved',
-        ...(companyName ? { company: companyName } : {}),
-      })
+      .find(approvedWfhRequestsQuery(companyName))
       .toArray();
 
     const parseRange = (req0) => {
@@ -1896,6 +1911,7 @@ async function attendanceStatsTrends(req, res) {
       day0.setHours(0, 0, 0, 0);
       const onLeave = new Set();
       for (const leave of approvedLeaves) {
+        if (!isLeaveTimeOffType(leave.leaveType)) continue;
         const range = parseRange(leave);
         if (!range) continue;
         if (!(day0 >= range.from && day0 <= range.to)) continue;
