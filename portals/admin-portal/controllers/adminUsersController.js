@@ -150,6 +150,7 @@ async function listUsers(req, res) {
       email: user.email || '',
       password: '', // Don't send password
       active: user.isActive !== false, // Default to true if not set
+      isActive: user.isActive === true,
       portals: user.portals || [], // Array of portal names
       role: user.role || 'user',
       employeeId: user.employeeId || '',
@@ -157,6 +158,7 @@ async function listUsers(req, res) {
       company: user.company || '',
       hasCredentialAccess: user.hasCredentialAccess !== false,
       hasSubscriptionAccess: user.hasSubscriptionAccess !== false,
+      attendanceReminderEmails: user.attendanceReminderEmails !== false,
       
       // Personal details
       phone: user.phone || '',
@@ -538,6 +540,7 @@ async function getUserById(req, res) {
         email: user.email || '',
         password: '', // Don't send password
         active: user.isActive !== false,
+        isActive: user.isActive === true,
         portals: user.portals || [],
         role: user.role || 'user',
         employeeId: user.employeeId || '',
@@ -545,6 +548,7 @@ async function getUserById(req, res) {
         company: user.company || '',
         hasCredentialAccess: user.hasCredentialAccess !== false,
         hasSubscriptionAccess: user.hasSubscriptionAccess !== false,
+        attendanceReminderEmails: user.attendanceReminderEmails !== false,
         card_no: user.card_no || '',
         emp_code: user.emp_code || '',
         exitDate: user.exitDate || ''
@@ -568,7 +572,7 @@ async function createUser(req, res) {
   try {
     const { 
       name, email, password, active, portals, role, employeeId, department, company: companyField, 
-      hasCredentialAccess, hasSubscriptionAccess,
+      hasCredentialAccess, hasSubscriptionAccess, attendanceReminderEmails,
       // Personal details
       phone,
       workPhone,
@@ -660,6 +664,7 @@ async function createUser(req, res) {
       company: companyField || company || '',
       hasCredentialAccess: hasCredentialAccess !== false,
       hasSubscriptionAccess: hasSubscriptionAccess !== false,
+      attendanceReminderEmails: attendanceReminderEmails !== false,
       
       // Personal details
       phone: phone || '',
@@ -742,6 +747,7 @@ async function createUser(req, res) {
         email: newUser.email,
         password: '', // Don't send password
         active: newUser.isActive,
+        isActive: newUser.isActive === true,
         portals: newUser.portals,
         role: newUser.role,
         employeeId: newUser.employeeId,
@@ -749,6 +755,7 @@ async function createUser(req, res) {
         company: newUser.company,
         hasCredentialAccess: newUser.hasCredentialAccess,
         hasSubscriptionAccess: newUser.hasSubscriptionAccess,
+        attendanceReminderEmails: newUser.attendanceReminderEmails,
         // Include all other fields in response
         phone: newUser.phone,
         workPhone: newUser.workPhone,
@@ -809,7 +816,7 @@ async function updateUser(req, res) {
     const { id } = req.params;
     const { 
       name, email, password, active, portals, role, employeeId, department, company: companyField, 
-      hasCredentialAccess, hasSubscriptionAccess,
+      hasCredentialAccess, hasSubscriptionAccess, attendanceReminderEmails,
       // Personal details
       phone,
       workPhone,
@@ -939,6 +946,7 @@ async function updateUser(req, res) {
     if (companyField !== undefined) updateData.company = companyField;
     if (hasCredentialAccess !== undefined) updateData.hasCredentialAccess = hasCredentialAccess;
     if (hasSubscriptionAccess !== undefined) updateData.hasSubscriptionAccess = hasSubscriptionAccess;
+    if (attendanceReminderEmails !== undefined) updateData.attendanceReminderEmails = attendanceReminderEmails !== false;
     
     // Personal details - Only update if provided
     if (phone !== undefined) updateData.phone = phone;
@@ -1018,6 +1026,7 @@ async function updateUser(req, res) {
         email: updatedUser.email,
         password: '', // Don't send password
         active: updatedUser.isActive !== false,
+        isActive: updatedUser.isActive === true,
         portals: updatedUser.portals || [],
         role: updatedUser.role || 'user',
         employeeId: updatedUser.employeeId || '',
@@ -1025,6 +1034,7 @@ async function updateUser(req, res) {
         company: updatedUser.company || '',
         hasCredentialAccess: updatedUser.hasCredentialAccess !== false,
         hasSubscriptionAccess: updatedUser.hasSubscriptionAccess !== false,
+        attendanceReminderEmails: updatedUser.attendanceReminderEmails !== false,
         card_no: updatedUser.card_no || '',
         emp_code: updatedUser.emp_code || '',
         exitDate: updatedUser.exitDate || ''
@@ -1252,6 +1262,7 @@ async function updatePortals(req, res) {
         name: updatedUser.name,
         email: updatedUser.email,
         active: updatedUser.isActive !== false,
+        isActive: updatedUser.isActive === true,
         portals: updatedUser.portals || [],
         role: updatedUser.role || 'user'
       }

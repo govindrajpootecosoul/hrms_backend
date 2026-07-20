@@ -140,7 +140,9 @@ async function loadActiveEmployees(company) {
   return usersCol
     .find({
       ...companyQuery(company),
-      isActive: { $ne: false },
+      // Strictly send reminders only to employees marked active.
+      // (Do not treat missing `isActive` as active for reminder emails.)
+      isActive: true,
       email: { $regex: /@/ },
     })
     .project({
@@ -149,6 +151,8 @@ async function loadActiveEmployees(company) {
       email: 1,
       employeeId: 1,
       department: 1,
+      attendanceReminderEmails: 1,
+      isActive: 1,
     })
     .toArray();
 }
@@ -365,6 +369,16 @@ async function sendAttendanceReminders({
         continue;
       }
       if (absentKeys.has(empId)) {
+        companyStats.skipped += 1;
+        summary.skipped += 1;
+        continue;
+      }
+      if (employee.attendanceReminderEmails === false) {
+        companyStats.skipped += 1;
+        summary.skipped += 1;
+        continue;
+      }
+      if (employee.isActive !== true) {
         companyStats.skipped += 1;
         summary.skipped += 1;
         continue;
