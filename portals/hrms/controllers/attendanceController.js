@@ -9,7 +9,7 @@ const {
 } = require('../utils/hrmsContext');
 const { getDb, LOGIN_DB_NAME } = require('../../../config/mongo');
 const responseCache = require('../../../lib/responseCache');
-const { storedCheckTimeToDate } = require('../../../lib/checkinTimeFormat');
+const { storedCheckTimeToDate, getOfficeTzOffset } = require('../../../lib/checkinTimeFormat');
 
 /** `dateRange` may be Date, object, or string — supports "YYYY-MM-DD - YYYY-MM-DD" and "… to …" */
 function splitDateRangeParts(dateRange) {
@@ -140,6 +140,39 @@ function hmToMinutes(hm) {
   const m = Number(parts[1]);
   if (!Number.isFinite(h) || !Number.isFinite(m)) return null;
   return h * 60 + m;
+}
+
+/**
+ * Biometric devices run ~6 minutes behind wall clock (same correction as employee portal).
+ * Override with BIOMETRIC_TIME_DRIFT_MINUTES env if needed.
+ */
+const BIOMETRIC_TIME_DRIFT_MINUTES = (() => {
+  const n = Number(process.env.BIOMETRIC_TIME_DRIFT_MINUTES);
+  return Number.isFinite(n) ? n : 6;
+})();
+
+function minutesToHm(mins) {
+  if (!Number.isFinite(mins)) return null;
+  const normalized = ((Math.round(mins) % 1440) + 1440) % 1440;
+  const h = Math.floor(normalized / 60);
+  const m = Math.floor(normalized % 60);
+  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+}
+
+function shiftTimeHm(hm, driftMinutes = BIOMETRIC_TIME_DRIFT_MINUTES) {
+  const mins = hmToMinutes(hm);
+  if (mins == null) return null;
+  const drift = Number(driftMinutes);
+  if (!Number.isFinite(drift) || drift === 0) return minutesToHm(mins);
+  return minutesToHm(mins + drift);
+}
+
+/** Normalize + apply biometric drift for machine punch_in / punch_out display. */
+function machinePunchHm(raw) {
+  if (raw == null) return null;
+  const s = String(raw).trim();
+  if (!s) return null;
+  return shiftTimeHm(s);
 }
 
 function minTimeHm(a, b) {
@@ -403,6 +436,48 @@ function csvEscape(v) {
   return s;
 }
 
+/** Minimum daily hours before `hours_worked` is flagged red in the export. */
+const FULL_DAY_HOURS = 8.5;
+
+const STATUS_EXPORT_COLORS = {
+  present: { fill: 'FFD1FAE5', font: 'FF065F46' },
+  late: { fill: 'FFFEF3C7', font: 'FF92400E' },
+  absent: { fill: 'FFFEE2E2', font: 'FF991B1B' },
+  wfh: { fill: 'FFDBEAFE', font: 'FF1E40AF' },
+  leave: { fill: 'FFFFEDD5', font: 'FF9A3412' },
+  wo: { fill: 'FFF1F5F9', font: 'FF334155' },
+};
+
+function statusExportColors(status) {
+  const s = String(status || '').trim().toLowerCase();
+  if (!s) return null;
+  if (s === 'present' || s === 'mis') return STATUS_EXPORT_COLORS.present;
+  if (s === 'late') return STATUS_EXPORT_COLORS.late;
+  if (s === 'absent') return STATUS_EXPORT_COLORS.absent;
+  if (s === 'wfh' || s === 'work from home' || s === 'work-from-home') return STATUS_EXPORT_COLORS.wfh;
+  if (s === 'leave' || s === 'on-leave' || s === 'on leave') return STATUS_EXPORT_COLORS.leave;
+  if (s === 'wo' || s === 'weekend' || s === 'weekly off') return STATUS_EXPORT_COLORS.wo;
+  return null;
+}
+
+/** `hours_worked` can be a decimal number or an "HH:MM" string. */
+function parseHoursWorked(value) {
+  if (value == null || value === '') return null;
+  const s = String(value).trim();
+  if (s.includes(':')) {
+    const mins = hmToMinutes(s);
+    return mins == null ? null : mins / 60;
+  }
+  const n = Number(s);
+  return Number.isFinite(n) ? n : null;
+}
+
+function applyCellColors(cell, colors, { bold = false } = {}) {
+  if (!colors) return;
+  cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: colors.fill } };
+  cell.font = { color: { argb: colors.font }, bold };
+}
+
 async function exportMachineAttendanceReports(req, res) {
   try {
     const companyName = requireCompany(req, res);
@@ -425,16 +500,26 @@ async function exportMachineAttendanceReports(req, res) {
     const usersCol = await getUsersCollection(null, companyName);
     const companyEmployees = await usersCol.find({ company: companyName }).toArray();
     const empCodeToEmployee = new Map();
+    const employeeAliasToCanonicalId = new Map();
+    const canonicalIdToEmpCode = new Map();
+    const normalizeAlias = (value) => String(value || '').trim().toLowerCase();
     for (const emp of companyEmployees) {
       const empCode = normalizeEmpCode(emp.emp_code);
       if (!empCode) continue;
-      empCodeToEmployee.set(empCode, {
+      const canonicalEmployeeId = emp.employeeId || emp.email?.split('@')[0] || '';
+      const employeeMeta = {
         employeeCode: empCode,
         employeeName: emp.name || emp.firstName || '',
         department: emp.department || '',
-        employeeId: emp.employeeId || emp.email?.split('@')[0] || '',
+        employeeId: canonicalEmployeeId,
         email: emp.email || '',
-      });
+      };
+      empCodeToEmployee.set(empCode, employeeMeta);
+      if (canonicalEmployeeId) canonicalIdToEmpCode.set(canonicalEmployeeId, empCode);
+      for (const alias of [canonicalEmployeeId, emp.employeeId, emp.email, emp.email?.split('@')[0]]) {
+        const normalizedAlias = normalizeAlias(alias);
+        if (normalizedAlias) employeeAliasToCanonicalId.set(normalizedAlias, canonicalEmployeeId);
+      }
     }
 
     let docs = await getMachineAttendanceForRange(range);
@@ -445,6 +530,103 @@ async function exportMachineAttendanceReports(req, res) {
       if (empCodeFilter && code !== empCodeFilter) return false;
       return true;
     });
+
+    const dates = enumerateUtcDatesInRange(range);
+    const employeeDb = await getEmployeeDbForHrms(companyName);
+    const manualCheckIns = await employeeDb
+      .collection('employee_checkins')
+      .find({ date: { $in: dates } })
+      .toArray();
+    const manualByEmployeeDate = new Map();
+    const officeTimeHm = (date) => {
+      if (!isValidDate(date)) return null;
+      const match = String(getOfficeTzOffset()).match(/^([+-])(\d{2}):(\d{2})$/);
+      const offsetMinutes = match
+        ? (match[1] === '-' ? -1 : 1) * (Number(match[2]) * 60 + Number(match[3]))
+        : 330;
+      const officeDate = new Date(date.getTime() + offsetMinutes * 60000);
+      return `${String(officeDate.getUTCHours()).padStart(2, '0')}:${String(officeDate.getUTCMinutes()).padStart(2, '0')}`;
+    };
+
+    for (const record of manualCheckIns) {
+      const storedCode = normalizeEmpCode(record.empCode || record.emp_code);
+      const canonicalEmployeeId =
+        employeeAliasToCanonicalId.get(normalizeAlias(record.employeeId)) ||
+        employeeAliasToCanonicalId.get(normalizeAlias(record.email));
+      const code =
+        (storedCode && empCodeToEmployee.has(storedCode) && storedCode) ||
+        canonicalIdToEmpCode.get(canonicalEmployeeId);
+      const date = String(record.date || '').slice(0, 10);
+      if (!code || !dates.includes(date)) continue;
+
+      const checkInDate = parseCheckTime(record.checkInTime, date);
+      const checkOutDate = parseCheckTime(record.checkOutTime, date);
+      const timeIn = officeTimeHm(checkInDate);
+      const timeOut = officeTimeHm(checkOutDate);
+      const isWfh =
+        String(record.status || '').toLowerCase() === 'wfh' ||
+        String(record.location || '').toLowerCase() === 'remote' ||
+        String(record.location || '').toLowerCase() === 'wfh' ||
+        String(record.workMode || '').toLowerCase() === 'wfh';
+      const key = `${code}|${date}`;
+      const existing = manualByEmployeeDate.get(key);
+      manualByEmployeeDate.set(key, {
+        timeIn: minTimeHm(existing?.timeIn, timeIn),
+        timeOut: maxTimeHm(existing?.timeOut, timeOut),
+        isWfh: Boolean(existing?.isWfh || isWfh),
+      });
+    }
+
+    const requestsCol = employeeDb.collection('attendance_requests');
+    const [approvedLeaves, approvedWfh] = await Promise.all([
+      requestsCol.find(approvedLeaveRequestsQuery(companyName)).toArray(),
+      requestsCol.find(approvedWfhRequestsQuery(companyName)).toArray(),
+    ]);
+    const leaveKeys = new Set();
+    const wfhKeys = new Set();
+    const addRequestDates = (requests, target) => {
+      for (const request of requests) {
+        const canonicalEmployeeId =
+          employeeAliasToCanonicalId.get(normalizeAlias(request.employeeId)) || request.employeeId;
+        const parts = splitDateRangeParts(request.dateRange);
+        if (!canonicalEmployeeId || !parts) continue;
+        const from = new Date(parts[0].trim());
+        const to = new Date(parts[1].trim());
+        if (!isValidDate(from) || !isValidDate(to)) continue;
+        from.setHours(0, 0, 0, 0);
+        to.setHours(0, 0, 0, 0);
+        for (const date of dates) {
+          const current = new Date(`${date}T00:00:00`);
+          if (current >= from && current <= to) target.add(`${canonicalEmployeeId}|${date}`);
+        }
+      }
+    };
+    addRequestDates(approvedLeaves, leaveKeys);
+    addRequestDates(approvedWfh, wfhKeys);
+
+    // A portal check-in or approved request can exist without a machine row.
+    // Add a synthetic row so those statuses are still represented in the export.
+    const exportedEmployeeDates = new Set(
+      docs.map((d) => `${normalizeEmpCode(d.emp_code)}|${extractYyyyMmDdFromMachineDate(d.date)}`)
+    );
+    for (const employeeDateKey of manualByEmployeeDate.keys()) {
+      if (exportedEmployeeDates.has(employeeDateKey)) continue;
+      const [code, date] = employeeDateKey.split('|');
+      if (empCodeFilter && code !== empCodeFilter) continue;
+      docs.push({ emp_code: code, date: `${date}T00:00:00.000Z`, status: '' });
+      exportedEmployeeDates.add(employeeDateKey);
+    }
+    for (const requestKey of new Set([...leaveKeys, ...wfhKeys])) {
+      const separatorIndex = requestKey.lastIndexOf('|');
+      const canonicalEmployeeId = requestKey.slice(0, separatorIndex);
+      const date = requestKey.slice(separatorIndex + 1);
+      const code = canonicalIdToEmpCode.get(canonicalEmployeeId);
+      const employeeDateKey = `${code}|${date}`;
+      if (!code || exportedEmployeeDates.has(employeeDateKey)) continue;
+      if (empCodeFilter && code !== empCodeFilter) continue;
+      docs.push({ emp_code: code, date: `${date}T00:00:00.000Z`, status: '' });
+      exportedEmployeeDates.add(employeeDateKey);
+    }
 
     // Normalize + sort
     const rows = docs
@@ -461,16 +643,48 @@ async function exportMachineAttendanceReports(req, res) {
         })();
         const shift = d.shift || d.shift_code || d.shiftCode || '';
         const hoursWorked = d.hours_worked ?? d.hoursWorked ?? '';
+        const machineTimeIn = machinePunchHm(d.punch_in) || '';
+        const machineTimeOut = machinePunchHm(d.punch_out) || '';
+        const manual = manualByEmployeeDate.get(`${code}|${yyyyMmDd}`);
+        const punchIn = minTimeHm(machineTimeIn, manual?.timeIn) || '';
+        const punchOut = maxTimeHm(machineTimeOut, manual?.timeOut) || '';
+        const hasMachineCheckIn = Boolean(machineTimeIn);
+        const hasManualCheckIn = Boolean(manual?.timeIn);
+        const checkInSource =
+          hasMachineCheckIn && hasManualCheckIn
+            ? 'Biometric + Portal'
+            : hasMachineCheckIn
+              ? 'Biometric'
+              : hasManualCheckIn
+                ? 'Portal'
+                : '';
+        const requestKey = `${meta.employeeId || ''}|${yyyyMmDd}`;
+        const dayNumber = new Date(`${yyyyMmDd}T00:00:00.000Z`).getUTCDay();
+        const isWeekend = dayNumber === 0 || dayNumber === 6;
+        const rawStatus = String(d.status || '').trim();
+        let status = rawStatus;
+        if (leaveKeys.has(requestKey)) {
+          status = 'Leave';
+        } else if (wfhKeys.has(requestKey) || manual?.isWfh) {
+          status = 'WFH';
+        } else if (punchIn && hmToMinutes(punchIn) > 9 * 60 + 30) {
+          status = 'Late';
+        } else if (punchIn && (!rawStatus || rawStatus.toLowerCase() === 'absent')) {
+          status = 'Present';
+        } else if (isWeekend && (!rawStatus || rawStatus.toLowerCase() === 'absent')) {
+          status = 'WO';
+        }
         return {
           name: meta.employeeName || d.name || '',
           emp_code: code || '',
           date: dateStr,
           day,
           shift,
-          punch_in: d.punch_in || '',
-          punch_out: d.punch_out || '',
+          punch_in: punchIn,
+          punch_out: punchOut,
           hours_worked: hoursWorked,
-          status: d.status || '',
+          check_in_source: checkInSource,
+          status,
           rawDate: yyyyMmDd,
         };
       })
@@ -489,33 +703,56 @@ async function exportMachineAttendanceReports(req, res) {
       'punch_in',
       'punch_out',
       'hours_worked',
+      'check_in_source',
       'status',
     ];
 
-    const csvLines = [header.join(',')];
+    const ExcelJS = require('exceljs');
+    const workbook = new ExcelJS.Workbook();
+    const sheet = workbook.addWorksheet('Biometric Attendance');
+
+    sheet.columns = header.map((key) => ({
+      key,
+      header: key,
+      width: key === 'name' ? 26 : key === 'check_in_source' ? 20 : key === 'date' ? 24 : 14,
+    }));
+
+    const headerRow = sheet.getRow(1);
+    headerRow.font = { bold: true, color: { argb: 'FF1E293B' } };
+    headerRow.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE2E8F0' } };
+
     for (const r of rows) {
-      csvLines.push(
-        [
-          csvEscape(r.name),
-          csvEscape(r.emp_code),
-          csvEscape(r.date),
-          csvEscape(r.day),
-          csvEscape(r.shift),
-          csvEscape(r.punch_in),
-          csvEscape(r.punch_out),
-          csvEscape(r.hours_worked),
-          csvEscape(r.status),
-        ].join(',')
-      );
+      const hours = parseHoursWorked(r.hours_worked);
+      const row = sheet.addRow({
+        name: r.name,
+        emp_code: r.emp_code,
+        date: r.date,
+        day: r.day,
+        shift: r.shift,
+        punch_in: r.punch_in,
+        punch_out: r.punch_out,
+        hours_worked: hours == null ? r.hours_worked : hours,
+        check_in_source: r.check_in_source,
+        status: r.status,
+      });
+
+      applyCellColors(row.getCell('status'), statusExportColors(r.status), { bold: true });
+      if (hours != null) {
+        applyCellColors(
+          row.getCell('hours_worked'),
+          hours >= FULL_DAY_HOURS ? STATUS_EXPORT_COLORS.present : STATUS_EXPORT_COLORS.absent
+        );
+      }
     }
 
     const filename = `biometric_attendance_${companyName.replace(/\s+/g, '_')}_${range.startDate}_to_${range.endDate}${
       empCodeFilter ? `_${empCodeFilter}` : ''
-    }.csv`;
+    }.xlsx`;
 
-    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    const buffer = await workbook.xlsx.writeBuffer();
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-    res.status(200).send(`${csvLines.join('\r\n')}\r\n`);
+    res.status(200).send(Buffer.from(buffer));
   } catch (error) {
     console.error('HRMS machine attendance export error:', error);
     res.status(500).json({
@@ -719,8 +956,8 @@ async function listAttendance(req, res) {
       const isPresent = (mStatus === 'present' || mStatus === 'mis') && hasPunchIn;
       if (!isPresent) continue; // requirement: only auto-checkin when machine says Present
 
-      const timeIn = m.punch_in ? String(m.punch_in).trim() : null;
-      const timeOut = m.punch_out && String(m.punch_out).trim() !== '' ? String(m.punch_out).trim() : null;
+      const timeIn = machinePunchHm(m.punch_in);
+      const timeOut = machinePunchHm(m.punch_out);
       const checkInTime = timeHmToDate(date, timeIn);
       let isLate = false;
       if (checkInTime) isLate = isLateByPunchIn(checkInTime);
@@ -1130,8 +1367,8 @@ async function attendanceStats(req, res) {
         if (!canonicalId) continue;
         if (!scopedCanonicalIds.has(canonicalId)) continue;
 
-        const checkInTime = timeHmToDate(date, r.punch_in ? String(r.punch_in) : null);
-        const checkOutTime = timeHmToDate(date, r.punch_out ? String(r.punch_out) : null);
+        const checkInTime = timeHmToDate(date, machinePunchHm(r.punch_in));
+        const checkOutTime = timeHmToDate(date, machinePunchHm(r.punch_out));
         if (!checkInTime) continue;
 
         // Avoid duplicates if already checked-in manually
@@ -1573,8 +1810,8 @@ async function attendanceStatsByDepartment(req, res) {
         if (!meta?.isActive) continue;
         if (requestedDept && requestedDept !== 'all' && meta.deptKey !== requestedDept) continue;
 
-        const checkInTime = timeHmToDate(date, r.punch_in ? String(r.punch_in) : null);
-        const checkOutTime = timeHmToDate(date, r.punch_out ? String(r.punch_out) : null);
+        const checkInTime = timeHmToDate(date, machinePunchHm(r.punch_in));
+        const checkOutTime = timeHmToDate(date, machinePunchHm(r.punch_out));
         if (!checkInTime) continue;
 
         const already = todayCheckIns.some((c) => {
@@ -1895,8 +2132,8 @@ async function attendanceStatsTrends(req, res) {
           if (!canonicalId) continue;
           const meta = employeeMeta.get(canonicalId);
           if (!meta?.isActive || !matchesDept(meta)) continue;
-          const checkInTime = timeHmToDate(dateStr, r.punch_in ? String(r.punch_in) : null);
-          const checkOutTime = timeHmToDate(dateStr, r.punch_out ? String(r.punch_out) : null);
+          const checkInTime = timeHmToDate(dateStr, machinePunchHm(r.punch_in));
+          const checkOutTime = timeHmToDate(dateStr, machinePunchHm(r.punch_out));
           if (!checkInTime) continue;
           const already = todayCheckIns.some((c) => (employeeIdMap.get(c?.employeeId) || c?.employeeId) === canonicalId);
           if (already) continue;
