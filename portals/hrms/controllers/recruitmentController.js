@@ -1,4 +1,5 @@
-const { connectMongo, initializeCompanyPortals } = require('../../../config/mongo');
+const bcrypt = require('bcryptjs');
+const { connectMongo, initializeCompanyPortals, getUsersCollection } = require('../../../config/mongo');
 const {
   getCompanyFromRequest,
   normalizeCompany,
@@ -18,6 +19,198 @@ function toYmdUTC(value) {
 
 function escapeRegExp(s) {
   return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/** Candidate is in Onboarding when Hired or offer accepted. */
+function isOnboardingEligible(candidate) {
+  if (!candidate) return false;
+  return (
+    candidate.hiringStatus === 'Hired' ||
+    candidate.status === 'Hired' ||
+    candidate.offerStatus === 'Accepted'
+  );
+}
+
+async function generateNextEmployeeId(usersCol, company) {
+  const companyFilter = company
+    ? { company: { $regex: new RegExp(`^${escapeRegExp(company)}$`, 'i') } }
+    : {};
+  const employees = await usersCol
+    .find(companyFilter, { projection: { employeeId: 1 } })
+    .toArray();
+  let maxNumber = 0;
+  for (const emp of employees) {
+    const match = String(emp.employeeId || '').match(/EMP(\d+)/i);
+    if (match) {
+      const num = parseInt(match[1], 10);
+      if (!Number.isNaN(num) && num > maxNumber) maxNumber = num;
+    }
+  }
+  return `EMP${String(maxNumber + 1).padStart(3, '0')}`;
+}
+
+/**
+ * When a candidate enters Onboarding, create (or link) an employee_details row
+ * so they appear in Current employees. Idempotent by linkedEmployeeId / email / recruitmentCandidateId.
+ */
+async function ensureEmployeeFromCandidate(candidate, company, recruitmentCol) {
+  if (!candidate || !isOnboardingEligible(candidate)) {
+    return { created: false, skipped: true, reason: 'not_onboarding' };
+  }
+
+  const resolvedCompany = normalizeCompany(company || candidate.company);
+  if (!resolvedCompany) {
+    return { created: false, skipped: true, reason: 'missing_company' };
+  }
+
+  const candidateId = candidate._id?.toString();
+  if (candidate.linkedEmployeeId || candidate.employeeMongoId) {
+    return {
+      created: false,
+      skipped: true,
+      reason: 'already_linked',
+      employeeId: candidate.employeeId || '',
+      linkedEmployeeId: candidate.linkedEmployeeId || candidate.employeeMongoId,
+    };
+  }
+
+  const usersCol = await getUsersCollection();
+  const email = candidate.email ? String(candidate.email).toLowerCase().trim() : '';
+
+  let existing = null;
+  if (candidateId) {
+    existing = await usersCol.findOne({ recruitmentCandidateId: candidateId });
+  }
+  if (!existing && email) {
+    existing = await usersCol.findOne({
+      email,
+      company: { $regex: new RegExp(`^${escapeRegExp(resolvedCompany)}$`, 'i') },
+    });
+  }
+
+  const linkFields = {
+    linkedEmployeeId: null,
+    employeeMongoId: null,
+    employeeId: '',
+    updatedAt: new Date(),
+  };
+
+  if (existing) {
+    linkFields.linkedEmployeeId = existing._id.toString();
+    linkFields.employeeMongoId = existing._id.toString();
+    linkFields.employeeId = existing.employeeId || '';
+    if (recruitmentCol && candidate._id) {
+      await recruitmentCol.updateOne(
+        { _id: candidate._id },
+        { $set: linkFields }
+      );
+      if (!existing.recruitmentCandidateId && candidateId) {
+        await usersCol.updateOne(
+          { _id: existing._id },
+          { $set: { recruitmentCandidateId: candidateId, updatedAt: new Date() } }
+        );
+      }
+    }
+    return {
+      created: false,
+      skipped: true,
+      reason: 'employee_exists',
+      employeeId: linkFields.employeeId,
+      linkedEmployeeId: linkFields.linkedEmployeeId,
+    };
+  }
+
+  const employeeId = await generateNextEmployeeId(usersCol, resolvedCompany);
+  const randomPassword =
+    Math.random().toString(36).slice(-12) + Math.random().toString(36).slice(-12);
+  const hashedPassword = await bcrypt.hash(randomPassword, 10);
+  const joiningDate = toYmdUTC(candidate.joiningDate) || '';
+
+  const newUser = {
+    name: String(candidate.candidateName || '').trim() || 'Employee',
+    email,
+    password: hashedPassword,
+    isActive: true,
+    active: true,
+    portals: [],
+    role: 'user',
+    employeeId,
+    department: candidate.department || '',
+    company: resolvedCompany,
+    hasCredentialAccess: true,
+    hasSubscriptionAccess: true,
+    attendanceReminderEmails: true,
+    phone: candidate.contactNumber || '',
+    workPhone: '',
+    homePhone: '',
+    personalEmail: '',
+    fatherName: '',
+    dateOfBirth: '',
+    actualDob: '',
+    age: '',
+    gender: '',
+    maritalStatus: '',
+    bloodGroup: '',
+    address: '',
+    presentAddress: '',
+    permanentAddress: '',
+    city: '',
+    state: '',
+    zipCode: '',
+    emergencyContact: '',
+    emergencyPhone: '',
+    emergencyRelation: '',
+    familyDetails: '',
+    jobTitle: candidate.position || candidate.jobTitle || '',
+    payrollCompany: '',
+    location: candidate.currentLocation || '',
+    reportingManager: '',
+    joiningDate,
+    exitDate: '',
+    card_no: '',
+    emp_code: '',
+    bankAccount: '',
+    ifsc: '',
+    bankName: '',
+    bankBranchName: '',
+    pan: '',
+    aadhaar: '',
+    rationNumber: '',
+    uan: '',
+    esiNo: '',
+    pfNo: '',
+    recruitmentCandidateId: candidateId || '',
+    createdAt: new Date(),
+    updatedAt: new Date(),
+  };
+
+  const insertResult = await usersCol.insertOne(newUser);
+  const linkedId = insertResult.insertedId.toString();
+
+  if (recruitmentCol && candidate._id) {
+    await recruitmentCol.updateOne(
+      { _id: candidate._id },
+      {
+        $set: {
+          linkedEmployeeId: linkedId,
+          employeeMongoId: linkedId,
+          employeeId,
+          updatedAt: new Date(),
+        },
+      }
+    );
+  }
+
+  console.log(
+    `[recruitment] Created employee ${employeeId} (${linkedId}) from candidate ${candidateId} for ${resolvedCompany}`
+  );
+
+  return {
+    created: true,
+    skipped: false,
+    employeeId,
+    linkedEmployeeId: linkedId,
+  };
 }
 
 async function recruitmentAnalytics(req, res) {
@@ -847,14 +1040,32 @@ async function createCandidate(req, res) {
     
     // Insert candidate
     const result = await recruitmentCol.insertOne(candidate);
+    const createdCandidate = { ...candidate, _id: result.insertedId };
+
+    let employeeSync = null;
+    if (isOnboardingEligible(createdCandidate)) {
+      try {
+        employeeSync = await ensureEmployeeFromCandidate(
+          createdCandidate,
+          company,
+          recruitmentCol
+        );
+      } catch (syncErr) {
+        console.error('[recruitment] ensureEmployeeFromCandidate (create) failed:', syncErr);
+        employeeSync = { created: false, skipped: true, reason: 'sync_error', error: syncErr.message };
+      }
+    }
     
     res.json({
       success: true,
       message: 'Candidate added successfully',
       data: {
         id: result.insertedId.toString(),
-        ...candidate
-      }
+        ...candidate,
+        employeeId: employeeSync?.employeeId || '',
+        linkedEmployeeId: employeeSync?.linkedEmployeeId || '',
+      },
+      employeeSync: employeeSync || undefined,
     });
   } catch (error) {
     console.error('HRMS add candidate error:', error);
@@ -1012,6 +1223,8 @@ async function updateCandidate(req, res) {
     
     // If company is not specified, search across all databases
     let result = null;
+    let recruitmentColUsed = null;
+    let companyForEmployee = normalizeCompany(company);
     if (!company || company === 'all' || company === 'undefined') {
       const dbs = await getAllHrmsDbs();
       for (const db of dbs) {
@@ -1021,6 +1234,7 @@ async function updateCandidate(req, res) {
           { $set: updateData }
         );
         if (result.matchedCount > 0) {
+          recruitmentColUsed = recruitmentCol;
           break; // Found and updated, exit loop
         }
       }
@@ -1028,6 +1242,7 @@ async function updateCandidate(req, res) {
       // Get HRMS database for specific company
       const db = await getHrmsDb(company);
       const recruitmentCol = db.collection('recruitment');
+      recruitmentColUsed = recruitmentCol;
       result = await recruitmentCol.updateOne(
         { _id: new ObjectId(candidateId) },
         { $set: updateData }
@@ -1043,19 +1258,45 @@ async function updateCandidate(req, res) {
     
     // Fetch the updated candidate to return all fields
     let updatedCandidate = null;
-    if (!company || company === 'all' || company === 'undefined') {
+    if (recruitmentColUsed) {
+      updatedCandidate = await recruitmentColUsed.findOne({ _id: new ObjectId(candidateId) });
+    } else if (!company || company === 'all' || company === 'undefined') {
       const dbs = await getAllHrmsDbs();
       for (const db of dbs) {
         const recruitmentCol = db.collection('recruitment');
         updatedCandidate = await recruitmentCol.findOne({ _id: new ObjectId(candidateId) });
         if (updatedCandidate) {
+          recruitmentColUsed = recruitmentCol;
           break;
         }
       }
     } else {
       const db = await getHrmsDb(company);
       const recruitmentCol = db.collection('recruitment');
+      recruitmentColUsed = recruitmentCol;
       updatedCandidate = await recruitmentCol.findOne({ _id: new ObjectId(candidateId) });
+    }
+
+    // Sync to Current employees when candidate enters Onboarding (Hired / offer accepted)
+    let employeeSync = null;
+    if (updatedCandidate && isOnboardingEligible(updatedCandidate)) {
+      try {
+        const empCompany =
+          companyForEmployee ||
+          normalizeCompany(updatedCandidate.company) ||
+          normalizeCompany(getCompanyFromRequest(req));
+        employeeSync = await ensureEmployeeFromCandidate(
+          updatedCandidate,
+          empCompany,
+          recruitmentColUsed
+        );
+        if (employeeSync?.linkedEmployeeId && recruitmentColUsed) {
+          updatedCandidate = await recruitmentColUsed.findOne({ _id: new ObjectId(candidateId) });
+        }
+      } catch (syncErr) {
+        console.error('[recruitment] ensureEmployeeFromCandidate failed:', syncErr);
+        employeeSync = { created: false, skipped: true, reason: 'sync_error', error: syncErr.message };
+      }
     }
     
     const formatDate = (date) => toYmdUTC(date);
@@ -1087,9 +1328,12 @@ async function updateCandidate(req, res) {
         interviewerFeedback: updatedCandidate.interviewerFeedback || '',
         remark: updatedCandidate.remark || '',
         company: updatedCandidate.company || null,
+        employeeId: updatedCandidate.employeeId || '',
+        linkedEmployeeId: updatedCandidate.linkedEmployeeId || updatedCandidate.employeeMongoId || '',
         createdAt: updatedCandidate.createdAt,
         updatedAt: updatedCandidate.updatedAt
-      }
+      },
+      employeeSync: employeeSync || undefined,
     });
   } catch (error) {
     console.error('HRMS update candidate error:', error);
