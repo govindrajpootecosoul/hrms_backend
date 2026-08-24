@@ -1,6 +1,7 @@
 const XLSX = require('xlsx');
 const { connectMongo } = require('../../../config/mongo');
 const { getCompanyDatabaseName, getDatabaseName, getCollectionName } = require('../../../config/database.config');
+const { findAcrossCompanies } = require('../lib/mergedAssetDb');
 
 /** Wrong slug used earlier (full "Ecosoul Home" → ecosoul_home_*); read that DB if canonical DB is empty */
 function getLegacyMistakenEcosoulAssetDbName() {
@@ -107,8 +108,6 @@ function defaultLocations() {
 
 async function getHistory(req, res) {
   try {
-    const companyId = req.query.companyId;
-    const company = req.query.company;
     const typeRaw = String(req.query.type || '').toLowerCase();
     const type = typeRaw === 'all' ? '' : typeRaw;
     const assetId = req.query.assetId;
@@ -117,26 +116,29 @@ async function getHistory(req, res) {
     const limitRaw = Number(req.query.limit || 50);
     const limit = Math.min(Math.max(limitRaw, 1), 200);
 
-    const collection = await getCollection('asset_history', company || null);
     const query = {};
-    if (companyId) query.companyId = companyId;
+    // Asset Watch: merge Ecosoul + Thrive — do not filter by companyId
     if (type) query.type = type;
     if (assetId || assetTag) {
       const v = assetId || assetTag;
       query.$or = [{ assetId: v }, { assetTag: v }];
     }
 
-    let items = [];
+    const fetchLimit = latestOnly ? null : Math.min(limit * 2, 400);
+    let items = await findAcrossCompanies('asset_history', query, {
+      sort: { createdAt: -1 },
+      limit: fetchLimit,
+    });
+
     if (latestOnly) {
-      const allItems = await collection.find(query).sort({ createdAt: -1 }).toArray();
       const latestMap = new Map();
-      for (const item of allItems) {
+      for (const item of items) {
         const key = item.assetId || item.assetTag;
         if (key && !latestMap.has(key)) latestMap.set(key, item);
       }
       items = Array.from(latestMap.values()).slice(0, limit);
     } else {
-      items = await collection.find(query).sort({ createdAt: -1 }).limit(limit).toArray();
+      items = items.slice(0, limit);
     }
 
     return res.json({ success: true, data: items, count: items.length });

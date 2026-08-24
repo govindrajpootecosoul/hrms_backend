@@ -1,6 +1,10 @@
 const XLSX = require('xlsx');
 const { connectMongo } = require('../../../config/mongo');
 const { getCollectionName } = require('../../../config/database.config');
+const {
+  findAcrossCompanies,
+  findOneAcrossCompanies,
+} = require('../lib/mergedAssetDb');
 
 function escapeRegex(value) {
   return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -80,27 +84,24 @@ function defaultLocations() {
 
 async function getAssets(req, res) {
   try {
-    const companyId = req.query.companyId;
     const company = String(req.query.company || '').trim();
     const id = req.query.id;
 
-    if (!company) {
-      return res.status(400).json({ success: false, error: 'company is required' });
-    }
-    const collection = await getCollection('assets', company);
-
+    // Delete by id: locate asset across Ecosoul + Thrive, then delete in its source DB
     if (id) {
-      const deleted = await collection.deleteOne({ id: String(id) });
+      const found = await findOneAcrossCompanies('assets', { id: String(id) }, company || null);
+      if (!found) {
+        return res.status(404).json({ success: false, error: 'Asset not found' });
+      }
+      const deleted = await found.collection.deleteOne({ id: String(id) });
       if (!deleted.deletedCount) {
         return res.status(404).json({ success: false, error: 'Asset not found' });
       }
       return res.json({ success: true, message: 'Asset deleted successfully' });
     }
 
-    const baseQuery = {};
-    if (companyId) baseQuery.companyId = companyId;
-
-    const assets = await collection.find(baseQuery).sort({ createdAt: -1 }).toArray();
+    // Asset Watch portal: always merge Ecosoul Home + Thrive inventory
+    const assets = await findAcrossCompanies('assets', {});
 
     return res.json({ success: true, data: assets, count: assets.length });
   } catch (error) {
@@ -147,16 +148,22 @@ async function updateAsset(req, res) {
     const id = body.id;
     const updateData = { ...body };
     delete updateData.id;
-    const company = updateData.company || body.company || '';
+    const preferredCompany = updateData.company || body.company || '';
 
     if (!id) return res.status(400).json({ success: false, error: 'Asset ID is required' });
-    if (!company) return res.status(400).json({ success: false, error: 'company is required' });
-    const collection = await getCollection('assets', company);
-    const prev = await collection.findOne({ id: String(id) });
+
+    // Resolve which company DB owns this asset (merged portal view)
+    const found = await findOneAcrossCompanies('assets', { id: String(id) }, preferredCompany || null);
+    if (!found) return res.status(404).json({ success: false, error: 'Asset not found' });
+
+    const { doc: prev, company, collection } = found;
+    // Keep asset in its source company DB; do not reassign ownership via update body
+    delete updateData.company;
+    delete updateData._sourceCompany;
 
     const result = await collection.updateOne(
       { id: String(id) },
-      { $set: { ...updateData, updatedAt: new Date().toISOString() } }
+      { $set: { ...updateData, company: prev.company || company, updatedAt: new Date().toISOString() } }
     );
     if (!result.matchedCount) return res.status(404).json({ success: false, error: 'Asset not found' });
 
@@ -177,7 +184,7 @@ async function updateAsset(req, res) {
       type,
       action,
       companyId: updateData.companyId || prev?.companyId,
-      company: updateData.company || prev?.company,
+      company: prev?.company || company,
       assetId: id,
       assetTag: prev?.assetTag,
       description: prev?.model || prev?.category || '',
@@ -197,12 +204,13 @@ async function updateAsset(req, res) {
 async function deleteAsset(req, res) {
   try {
     const id = req.query.id;
-    const company = req.query.company || '';
+    const preferredCompany = req.query.company || '';
     if (!id) return res.status(400).json({ success: false, error: 'Asset ID is required' });
-    if (!company) return res.status(400).json({ success: false, error: 'company is required' });
 
-    const collection = await getCollection('assets', company);
-    const prev = await collection.findOne({ id: String(id) });
+    const found = await findOneAcrossCompanies('assets', { id: String(id) }, preferredCompany || null);
+    if (!found) return res.status(404).json({ success: false, error: 'Asset not found' });
+
+    const { doc: prev, company, collection } = found;
     const result = await collection.deleteOne({ id: String(id) });
     if (!result.deletedCount) return res.status(404).json({ success: false, error: 'Asset not found' });
 
@@ -210,7 +218,7 @@ async function deleteAsset(req, res) {
       type: 'deleted',
       action: 'deleted',
       companyId: prev?.companyId,
-      company: prev?.company,
+      company: prev?.company || company,
       assetId: id,
       assetTag: prev?.assetTag,
       description: prev?.model || prev?.category || '',
@@ -229,26 +237,20 @@ async function deleteAsset(req, res) {
 async function getAssetDetail(req, res) {
   try {
     const assetId = req.params.assetId;
-    const companyId = req.query.companyId;
     const company = req.query.company;
     if (!assetId) return res.status(400).json({ success: false, error: 'Asset ID is required' });
-    if (!company) return res.status(400).json({ success: false, error: 'company is required' });
 
-    const collection = await getCollection('assets', company);
     const query = {
       $or: [
         { id: String(assetId) },
-        { _id: String(assetId) },
         { assetTag: String(assetId) },
         { assetTag: { $regex: new RegExp(`^${escapeRegex(String(assetId))}$`, 'i') } },
       ],
     };
-    if (companyId) query.companyId = companyId;
-    if (company) query.company = { $regex: new RegExp(`^${escapeRegex(company)}$`, 'i') };
 
-    const asset = await collection.findOne(query);
-    if (!asset) return res.status(404).json({ success: false, error: 'Asset not found' });
-    return res.json({ success: true, data: asset });
+    const found = await findOneAcrossCompanies('assets', query, company || null);
+    if (!found) return res.status(404).json({ success: false, error: 'Asset not found' });
+    return res.json({ success: true, data: found.doc });
   } catch (error) {
     console.error('[asset-tracker] get asset detail failed:', error);
     return res.status(500).json({ success: false, error: error.message || 'Failed to fetch asset' });

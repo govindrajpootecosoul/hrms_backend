@@ -1,6 +1,7 @@
 const XLSX = require('xlsx');
 const { connectMongo } = require('../../../config/mongo');
 const { getCompanyDatabaseName, getDatabaseName, getCollectionName } = require('../../../config/database.config');
+const { findAcrossCompanies } = require('../lib/mergedAssetDb');
 
 /** Wrong slug used earlier (full "Ecosoul Home" → ecosoul_home_*); read that DB if canonical DB is empty */
 function getLegacyMistakenEcosoulAssetDbName() {
@@ -107,11 +108,8 @@ function defaultLocations() {
 
 async function getCategoryCounts(req, res) {
   try {
-    const companyId = req.query.companyId;
-    const company = req.query.company || null;
-    const query = companyId ? { companyId } : {};
-    const collection = await getCollection('assets', company);
-    const assets = await collection.find(query).toArray();
+    // Asset Watch: merge Ecosoul Home + Thrive category stats
+    const assets = await findAcrossCompanies('assets', {});
 
     const categoryCounts = {};
     const subcategoryCounts = {};
