@@ -21,6 +21,7 @@ const DEFAULT_LEAVE_BALANCES = {
   'Maternity Leave': 0,
   'LOP': 0,
 };
+const MATERNITY_DEFAULT_DAYS = 180;
 
 function escapeRe(s) {
   return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -51,6 +52,10 @@ function isFemaleEmployee(gender) {
   return String(gender || '').trim().toLowerCase() === 'female';
 }
 
+function balanceHasMaternityKey(balances) {
+  return balances != null && Object.prototype.hasOwnProperty.call(balances, 'Maternity Leave');
+}
+
 async function getEmployeeGenderForPortal(company, employeeId) {
   const empId = String(employeeId || '').trim();
   if (!company || !empId) return '';
@@ -71,9 +76,13 @@ async function getEmployeeGenderForPortal(company, employeeId) {
   return emp?.gender || '';
 }
 
-function filterBalancesForGender(balances, gender) {
+function filterBalancesForGender(balances, gender, { maternitySeeded = false } = {}) {
   const b = { ...balances };
-  if (!isFemaleEmployee(gender)) {
+  if (isFemaleEmployee(gender)) {
+    if (!maternitySeeded && !balanceHasMaternityKey(balances)) {
+      b['Maternity Leave'] = MATERNITY_DEFAULT_DAYS;
+    }
+  } else {
     b['Maternity Leave'] = 0;
   }
   return b;
@@ -89,7 +98,7 @@ async function getLeaveBalancesForEmployee({ company, employeeId }) {
   const empId = String(employeeId).trim();
   const companyClause = buildLeaveCompanyClause(company);
 
-  const doc = await col.findOne(
+  let doc = await col.findOne(
     {
       ...companyClause,
       $or: [
@@ -97,20 +106,64 @@ async function getLeaveBalancesForEmployee({ company, employeeId }) {
         { employeeId: new RegExp(`^${escapeRe(empId)}$`, 'i') },
       ],
     },
-    { projection: { balances: 1, employeeId: 1 } }
+    { projection: { balances: 1, employeeId: 1, company: 1 } }
   );
 
   const gender = company ? await getEmployeeGenderForPortal(company, empId) : '';
+  let maternitySeeded = balanceHasMaternityKey(doc?.balances);
+
+  // Persist default 180 maternity days for female employees once.
+  if (isFemaleEmployee(gender) && !maternitySeeded) {
+    const now = new Date();
+    const companyName =
+      (doc && doc.company) ||
+      normalizePortalCompany(company) ||
+      String(company || '').trim();
+    await col.updateOne(
+      {
+        ...companyClause,
+        $or: [
+          { employeeId: empId },
+          { employeeId: new RegExp(`^${escapeRe(empId)}$`, 'i') },
+        ],
+      },
+      {
+        $set: {
+          'balances.Maternity Leave': MATERNITY_DEFAULT_DAYS,
+          updatedAt: now,
+        },
+        $setOnInsert: {
+          company: companyName,
+          employeeId: empId,
+          createdAt: now,
+        },
+      },
+      { upsert: true }
+    );
+    maternitySeeded = true;
+    doc = {
+      ...(doc || {}),
+      balances: {
+        ...DEFAULT_LEAVE_BALANCES,
+        ...(doc?.balances || {}),
+        'Maternity Leave': MATERNITY_DEFAULT_DAYS,
+      },
+    };
+  }
+
   const balances = filterBalancesForGender(
     { ...DEFAULT_LEAVE_BALANCES, ...(doc?.balances || {}) },
-    gender
+    gender,
+    { maternitySeeded }
   );
   return { balances, gender };
 }
 
 function balancesToList(balances, gender) {
-  const b = filterBalancesForGender(balances || {}, gender);
-  return [
+  const b = filterBalancesForGender(balances || {}, gender, {
+    maternitySeeded: balanceHasMaternityKey(balances),
+  });
+  const list = [
     {
       type: 'Leave',
       balance: Number.isFinite(Number(b['Casual Leave'])) ? Number(b['Casual Leave']) : 0,
@@ -120,6 +173,15 @@ function balancesToList(balances, gender) {
       balance: Number.isFinite(Number(b['Work From Home'])) ? Number(b['Work From Home']) : 0,
     },
   ];
+  if (isFemaleEmployee(gender)) {
+    list.push({
+      type: 'Maternity Leave',
+      balance: Number.isFinite(Number(b['Maternity Leave']))
+        ? Number(b['Maternity Leave'])
+        : MATERNITY_DEFAULT_DAYS,
+    });
+  }
+  return list;
 }
 
 function totalLeaveBalance(balances) {

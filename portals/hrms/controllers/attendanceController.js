@@ -472,6 +472,14 @@ function parseHoursWorked(value) {
   return Number.isFinite(n) ? n : null;
 }
 
+/** Decimal hours from punch_in / punch_out (same math as biometric device totals). */
+function hoursFromPunchTimes(punchIn, punchOut) {
+  const inMins = hmToMinutes(punchIn);
+  const outMins = hmToMinutes(punchOut);
+  if (inMins == null || outMins == null || outMins < inMins) return null;
+  return Number(((outMins - inMins) / 60).toFixed(3));
+}
+
 function applyCellColors(cell, colors, { bold = false } = {}) {
   if (!colors) return;
   cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: colors.fill } };
@@ -642,7 +650,6 @@ async function exportMachineAttendanceReports(req, res) {
           return dt.toLocaleDateString('en-US', { weekday: 'short', timeZone: 'UTC' });
         })();
         const shift = d.shift || d.shift_code || d.shiftCode || '';
-        const hoursWorked = d.hours_worked ?? d.hoursWorked ?? '';
         const machineTimeIn = machinePunchHm(d.punch_in) || '';
         const machineTimeOut = machinePunchHm(d.punch_out) || '';
         const manual = manualByEmployeeDate.get(`${code}|${yyyyMmDd}`);
@@ -650,6 +657,17 @@ async function exportMachineAttendanceReports(req, res) {
         const punchOut = maxTimeHm(machineTimeOut, manual?.timeOut) || '';
         const hasMachineCheckIn = Boolean(machineTimeIn);
         const hasManualCheckIn = Boolean(manual?.timeIn);
+        // Portal rows often have punch times but machine hours_worked=0; compute from punches
+        // the same way biometric totals are derived (out − in).
+        const storedHours = parseHoursWorked(d.hours_worked ?? d.hoursWorked);
+        const computedHours = hoursFromPunchTimes(punchIn, punchOut);
+        const hoursWorked =
+          computedHours != null &&
+          (storedHours == null || storedHours === 0 || hasManualCheckIn)
+            ? computedHours
+            : storedHours != null
+              ? storedHours
+              : '';
         const checkInSource =
           hasMachineCheckIn && hasManualCheckIn
             ? 'Biometric + Portal'

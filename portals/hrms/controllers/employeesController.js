@@ -52,11 +52,15 @@ async function listEmployees(req, res) {
     if (status) {
       const s = String(status).trim().toLowerCase();
       // DB uses isActive/active flags (admin portal), not a `status` string.
-      // Interpret common values.
+      // Interpret common values. Ex-employees are typically stored as active: false.
       if (s === 'active' || s === 'current') {
         query.isActive = { $ne: false };
+        query.active = { $ne: false };
       } else if (s === 'inactive' || s === 'ex' || s === 'terminated' || s === 'resigned') {
-        query.isActive = false;
+        query.$and = [
+          ...(Array.isArray(query.$and) ? query.$and : []),
+          { $or: [{ isActive: false }, { active: false }] },
+        ];
       } else {
         // Backward-compat: if some collections truly store status as string.
         query.status = status;
@@ -67,23 +71,28 @@ async function listEmployees(req, res) {
     const employees = await usersCol.find(query).toArray();
     
     // Transform to frontend format
-    const formattedEmployees = employees.map(emp => ({
-      id: emp._id.toString(),
-      employeeId: emp.employeeId || emp.email?.split('@')[0] || 'N/A',
-      name: emp.name || emp.firstName || 'Unknown',
-      email: emp.email || '',
-      department: emp.department || 'General',
-      designation: emp.designation || emp.role || 'Employee',
-      status: emp.status || 'active',
-      phone: emp.phone || emp.mobile || '',
-      joiningDate: emp.joiningDate || emp.createdAt || null,
-      location: emp.location || '',
-      payrollCompany: emp.payrollCompany || '',
-      gender: emp.gender || '',
-      // IMPORTANT: Attendance APIs use `emp_code` as the biometric/employee code identifier.
-      // Expose it as `biometricId` so UI filters (Absent/Present sets) match correctly.
-      biometricId: emp.emp_code || emp.biometricId || emp.employeeId || emp.email?.split('@')[0] || ''
-    }));
+    const formattedEmployees = employees.map((emp) => {
+      const isActive = emp.isActive !== false && emp.active !== false;
+      return {
+        id: emp._id.toString(),
+        employeeId: emp.employeeId || emp.email?.split('@')[0] || 'N/A',
+        name: emp.name || emp.firstName || 'Unknown',
+        email: emp.email || '',
+        department: emp.department || 'General',
+        designation: emp.designation || emp.role || 'Employee',
+        status: isActive ? 'Active' : 'Inactive',
+        active: isActive,
+        isActive,
+        phone: emp.phone || emp.mobile || '',
+        joiningDate: emp.joiningDate || emp.createdAt || null,
+        location: emp.location || '',
+        payrollCompany: emp.payrollCompany || '',
+        gender: emp.gender || '',
+        // IMPORTANT: Attendance APIs use `emp_code` as the biometric/employee code identifier.
+        // Expose it as `biometricId` so UI filters (Absent/Present sets) match correctly.
+        biometricId: emp.emp_code || emp.biometricId || emp.employeeId || emp.email?.split('@')[0] || '',
+      };
+    });
     
     res.json({
       success: true,

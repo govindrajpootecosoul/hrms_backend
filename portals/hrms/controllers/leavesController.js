@@ -30,12 +30,62 @@ const DEFAULT_LEAVE_BALANCES = {
 const STANDARD_LEAVE_ALLOCATIONS = {
   'Casual Leave': 12,
   'Work From Home': 15,
+  'Maternity Leave': 180,
 };
 
 const BULK_ALLOCATION_KEYS = [
   'Casual Leave',
   'Work From Home',
+  'Maternity Leave',
 ];
+
+const MATERNITY_DEFAULT_DAYS = 180;
+
+function balanceHasMaternityKey(balances) {
+  return balances != null && Object.prototype.hasOwnProperty.call(balances, 'Maternity Leave');
+}
+
+/** Seed Maternity Leave = 180 for female employees who do not yet have the key. */
+async function ensureMaternityDefaultsForCompany(company, col) {
+  const employees = await getCompanyEmployeesForLeave(company);
+  const females = employees.filter((e) => isFemaleEmployee(e.gender));
+  if (!females.length) return 0;
+
+  const femaleIds = females.map((e) => e.employeeId);
+  const existing = await col
+    .find({ company, employeeId: { $in: femaleIds } }, { projection: { employeeId: 1, balances: 1 } })
+    .toArray();
+  const byId = new Map(existing.map((d) => [String(d.employeeId), d]));
+
+  const now = new Date();
+  const ops = [];
+  for (const emp of females) {
+    const doc = byId.get(emp.employeeId);
+    if (balanceHasMaternityKey(doc?.balances)) continue;
+    ops.push({
+      updateOne: {
+        filter: { company, employeeId: emp.employeeId },
+        update: {
+          $set: {
+            'balances.Maternity Leave': MATERNITY_DEFAULT_DAYS,
+            updatedAt: now,
+            employeeName: emp.name || '',
+            employeeEmail: emp.email || '',
+          },
+          $setOnInsert: {
+            company,
+            employeeId: emp.employeeId,
+            createdAt: now,
+          },
+        },
+        upsert: true,
+      },
+    });
+  }
+  if (!ops.length) return 0;
+  const result = await col.bulkWrite(ops, { ordered: false });
+  return result.upsertedCount + result.modifiedCount;
+}
 
 function normalizeLeaveTypeKey(leaveType) {
   const raw = String(leaveType || '').trim();
@@ -100,7 +150,11 @@ async function getCompanyEmployeesForLeave(company) {
   const { getUsersCollection } = require('../../../config/mongo');
   const usersCol = await getUsersCollection(null, company);
   const employees = await usersCol
-    .find({ company })
+    .find({
+      company,
+      isActive: { $ne: false },
+      active: { $ne: false },
+    })
     .project({ employeeId: 1, email: 1, gender: 1, name: 1, firstName: 1 })
     .toArray();
   return employees
@@ -420,6 +474,13 @@ async function listLeaveBalances(req, res) {
 
     const employeeId = (req.query.employeeId || '').toString().trim();
     const col = await getLeaveBalancesCol(company);
+
+    // Females get Maternity Leave (180) seeded once if missing.
+    try {
+      await ensureMaternityDefaultsForCompany(company, col);
+    } catch (seedErr) {
+      console.warn('[hrms-portal] maternity default seed skipped:', seedErr?.message || seedErr);
+    }
 
     const query = { company };
     if (employeeId) query.employeeId = employeeId;
