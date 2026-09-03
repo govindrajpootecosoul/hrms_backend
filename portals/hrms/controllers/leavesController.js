@@ -537,7 +537,7 @@ async function adjustLeaveBalance(req, res) {
     const employeeId = String(req.params.employeeId || '').trim();
     if (!employeeId) return res.status(400).json({ success: false, error: 'employeeId is required' });
 
-    const { leaveType, delta, reason, performedBy } = req.body || {};
+    const { leaveType, delta, targetBalance, reason, performedBy } = req.body || {};
     const leaveKey = normalizeLeaveTypeKey(leaveType);
     if (!leaveKey) return res.status(400).json({ success: false, error: 'leaveType is required' });
 
@@ -551,23 +551,36 @@ async function adjustLeaveBalance(req, res) {
       }
     }
 
-    const inc = safeInt(delta, 0);
-    if (!inc) return res.status(400).json({ success: false, error: 'delta must be a non-zero number' });
-
     const col = await getLeaveBalancesCol(company);
     const historyCol = await getLeaveBalanceHistoryCol(company);
 
-    // Read current to clamp at 0 (no negative balances).
+    // Allow negative / decimal balances. Prefer absolute targetBalance so UI value is exact.
     const existing = await col.findOne({ company, employeeId }, { projection: { balances: 1 } });
     const prevBalances = { ...DEFAULT_LEAVE_BALANCES, ...(existing?.balances || {}) };
-    const prevValue = safeInt(prevBalances[leaveKey], 0);
-    const nextValue = Math.max(0, prevValue + inc);
-    const appliedDelta = nextValue - prevValue;
+    const prevValue = Number(prevBalances[leaveKey] ?? 0);
+    const prevNum = Number.isFinite(prevValue) ? prevValue : 0;
+
+    let nextValue;
+    if (targetBalance !== undefined && targetBalance !== null && targetBalance !== '') {
+      const target = Number(targetBalance);
+      if (!Number.isFinite(target)) {
+        return res.status(400).json({ success: false, error: 'targetBalance must be a valid number' });
+      }
+      nextValue = target;
+    } else {
+      const inc = Number(delta);
+      if (!Number.isFinite(inc) || inc === 0) {
+        return res.status(400).json({ success: false, error: 'delta must be a non-zero number' });
+      }
+      nextValue = prevNum + inc;
+    }
+
+    const appliedDelta = nextValue - prevNum;
     if (appliedDelta === 0) {
       return res.json({
         success: true,
-        message: 'No change (balance already at minimum)',
-        data: { employeeId, leaveType: leaveKey, previous: prevValue, next: nextValue },
+        message: 'No change',
+        data: { employeeId, leaveType: leaveKey, previous: prevNum, next: nextValue },
       });
     }
 
@@ -575,9 +588,11 @@ async function adjustLeaveBalance(req, res) {
     await col.updateOne(
       { company, employeeId },
       {
-        $set: { updatedAt: now },
+        $set: {
+          updatedAt: now,
+          [`balances.${leaveKey}`]: nextValue,
+        },
         $setOnInsert: { company, employeeId, createdAt: now },
-        $inc: { [`balances.${leaveKey}`]: appliedDelta },
       },
       { upsert: true }
     );
@@ -587,7 +602,7 @@ async function adjustLeaveBalance(req, res) {
       employeeId,
       leaveType: leaveKey,
       delta: appliedDelta,
-      previous: prevValue,
+      previous: prevNum,
       next: nextValue,
       reason: typeof reason === 'string' ? reason.trim() : '',
       performedBy: typeof performedBy === 'string' ? performedBy.trim() : 'HR',
@@ -600,7 +615,7 @@ async function adjustLeaveBalance(req, res) {
     return res.json({
       success: true,
       message: 'Leave balance updated',
-      data: { employeeId, leaveType: leaveKey, previous: prevValue, next: nextValue, delta: appliedDelta },
+      data: { employeeId, leaveType: leaveKey, previous: prevNum, next: nextValue, delta: appliedDelta },
     });
   } catch (error) {
     console.error('[hrms-portal] adjustLeaveBalance error:', error);
