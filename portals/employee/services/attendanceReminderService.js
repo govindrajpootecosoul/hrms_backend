@@ -143,6 +143,8 @@ async function loadActiveEmployees(company) {
       // Strictly send reminders only to employees marked active.
       // (Do not treat missing `isActive` as active for reminder emails.)
       isActive: true,
+      // Toggle off => attendanceReminderEmails === false; missing/true => eligible
+      attendanceReminderEmails: { $ne: false },
       email: { $regex: /@/ },
     })
     .project({
