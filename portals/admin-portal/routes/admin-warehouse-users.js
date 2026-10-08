@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 
 const c = require('../controllers/adminUsersController');
+const warehouseAttendance = require('../controllers/warehouseAttendanceController');
 const { requireAuth, requireSuperAdmin } = require('../middlewares/auth');
 
 // Force controller to operate on warehouse users collection
@@ -9,6 +10,10 @@ router.use((req, _res, next) => {
   req.usersCollectionType = 'warehouse';
   next();
 });
+
+// Warehouse daily attendance (CSV → MongoDB warehouse_employee_details)
+router.get('/attendance', warehouseAttendance.listWarehouseAttendance);
+router.post('/attendance/refresh', warehouseAttendance.refreshWarehouseAttendanceFromCsv);
 
 router.get('/', c.listUsers);
 router.get('/departments/list', c.listDepartments);

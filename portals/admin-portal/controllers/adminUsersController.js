@@ -7,6 +7,7 @@ const {
   encryptAnnualCtcForStorage,
   decryptAnnualCtcStored,
 } = require('../../../utils/ctcEncryption');
+const { companyQuery } = require('../../hrms/utils/hrmsContext');
 
 const DEPARTMENT_MANAGERS_COLLECTION = 'department_managers';
 const UI_SETTINGS_COLLECTION = 'ui_settings';
@@ -112,7 +113,9 @@ async function listUsers(req, res) {
     }
     
     const usersCol = await getUsersCollectionForRequest(req);
-    const query = { company: resolvedCompany };
+    // Same flexible company match as attendance reminder sender (companyQuery),
+    // so Email Alerts lists everyone who could receive reminder emails.
+    const query = { ...companyQuery(resolvedCompany) };
     if (payrollCompany && payrollCompany !== 'all') {
       const pc = String(payrollCompany).trim();
       if (pc) {
@@ -933,6 +936,8 @@ async function updateUser(req, res) {
           });
         }
         updateData.exitDate = exit || null;
+        // Stop check-in/out reminder emails when employee is deactivated
+        updateData.attendanceReminderEmails = false;
       } else {
         updateData.exitDate = null;
       }

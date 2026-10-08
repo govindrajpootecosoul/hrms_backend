@@ -16,8 +16,19 @@ function normalizeCompany(value) {
   if (value == null || value === '' || value === 'undefined') return null;
   const raw = String(value).trim();
   if (!raw || raw === 'all') return null;
-  const lc = raw.toLowerCase();
-  if (lc === '1' || lc === 'ecosoul' || lc === 'ecosoulhome' || lc === 'eco soul' || lc === 'ecosoul home') return 'Ecosoul Home';
+  const lc = raw.toLowerCase().replace(/\s+/g, ' ');
+  // Ecosoul variants (with/without spaces): Ecosoul, Eco Soul, Ecosoul Home, ecosoulhome, …
+  const ecosoulCompact = lc.replace(/\s+/g, '');
+  if (
+    lc === '1' ||
+    ecosoulCompact === 'ecosoul' ||
+    ecosoulCompact === 'ecosoulhome' ||
+    lc === 'eco soul' ||
+    lc === 'ecosoul home' ||
+    lc === 'eco soul home'
+  ) {
+    return 'Ecosoul Home';
+  }
   if (lc === '2' || lc === 'thrive' || lc === 'thrive brands' || lc === 'thrivebrands') return 'Thrive';
   return raw;
 }
@@ -31,8 +42,13 @@ function companyQuery(company) {
   const normalized = normalizeCompany(company);
   if (!normalized) return {};
   const lc = normalized.toLowerCase();
-  if (lc === 'thrive') return { company: { $regex: /^thrive$/i } };
-  if (lc.includes('ecosoul') || lc.includes('eco soul')) return { company: { $regex: /ecosoul/i } };
+  // Thrive: exact-ish (Thrive / Thrive Brands)
+  if (lc === 'thrive') return { company: { $regex: /^thrive(\s+brands)?$/i } };
+  // Ecosoul: only canonical variants (NOT every string containing "ecosoul")
+  // Matches: Ecosoul, Ecosoul Home, ecosoulhome — excludes e.g. "Ecosoul India Pvt"
+  if (lc.includes('ecosoul') || lc.includes('eco soul')) {
+    return { company: { $regex: /^eco\s*soul(\s*home)?$/i } };
+  }
   return { company: { $regex: new RegExp(`^${escapeRe(normalized)}$`, 'i') } };
 }
 

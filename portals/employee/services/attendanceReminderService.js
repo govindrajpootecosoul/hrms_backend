@@ -135,28 +135,42 @@ async function markReminderSent({ company, employeeId, email, slot, dateYmd }) {
   );
 }
 
+/**
+ * Same eligibility rules as Admin → Users → Email Alerts:
+ * - company matches companyQuery (aligned with admin listUsers)
+ * - isActive === true (strict)
+ * - attendanceReminderEmails !== false (screen toggle; missing = on)
+ * - has a usable email
+ */
+function attendanceReminderRecipientQuery(company) {
+  return {
+    ...companyQuery(company),
+    isActive: true,
+    attendanceReminderEmails: { $ne: false },
+    email: { $regex: /@/ },
+  };
+}
+
 async function loadActiveEmployees(company) {
   const usersCol = await getUsersCollection();
-  return usersCol
-    .find({
-      ...companyQuery(company),
-      // Strictly send reminders only to employees marked active.
-      // (Do not treat missing `isActive` as active for reminder emails.)
-      isActive: true,
-      // Toggle off => attendanceReminderEmails === false; missing/true => eligible
-      attendanceReminderEmails: { $ne: false },
-      email: { $regex: /@/ },
-    })
+  const canonical = normalizeCompany(company);
+  const rows = await usersCol
+    .find(attendanceReminderRecipientQuery(company))
     .project({
       name: 1,
       firstName: 1,
       email: 1,
       employeeId: 1,
       department: 1,
+      company: 1,
       attendanceReminderEmails: 1,
       isActive: 1,
     })
     .toArray();
+
+  // Extra guard: only keep docs whose company normalizes to this company
+  // (prevents loose regex leftovers from getting mail).
+  return rows.filter((emp) => normalizeCompany(emp?.company) === canonical);
 }
 
 async function loadApprovedAbsenceKeys(company, dateYmd) {
@@ -453,6 +467,7 @@ module.exports = {
   officeYmd,
   isWeekdayOffice,
   ensureReminderLogIndexes,
+  attendanceReminderRecipientQuery,
   buildCheckInReminderEmail,
   buildCheckOutReminderEmail,
   sendAttendanceReminders,

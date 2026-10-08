@@ -1,9 +1,10 @@
 const { getDb, getEmployeePortalDb, getUsersCollection, LOGIN_DB_NAME } = require('../../../config/mongo');
-const { EMPLOYEE_CHECKINS } = require('../models');
+const { EMPLOYEE_CHECKINS, ATTENDANCE_REQUESTS } = require('../models');
 const {
   dateToOfficeHm,
   storedCheckTimeToIso,
 } = require('../../../lib/checkinTimeFormat');
+const { parseDateRangeString, normalizeLeaveTypeKey } = require('../../../lib/leaveBalanceService');
 
 /** Close open sessions automatically after 24 hours without checkout (manual or biometric display). */
 const AUTO_CHECKOUT_SESSION_MS = 24 * 60 * 60 * 1000;
@@ -11,6 +12,86 @@ const AUTO_CHECKOUT_SESSION_MINUTES = AUTO_CHECKOUT_SESSION_MS / 60000;
 
 function todayYMD() {
   return new Date().toISOString().split('T')[0];
+}
+
+function todayYmdIst() {
+  try {
+    return new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'Asia/Kolkata',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).format(new Date());
+  } catch {
+    return todayYMD();
+  }
+}
+
+function isWfhLeaveType(leaveType) {
+  const key = normalizeLeaveTypeKey(leaveType);
+  if (key === 'Work From Home') return true;
+  const t = String(leaveType || '').trim().toLowerCase();
+  return t === 'work from home' || t === 'wfh';
+}
+
+function dateInRange(ymd, range) {
+  if (!ymd || !range?.start || !range?.end) return false;
+  const day = new Date(`${ymd}T12:00:00.000Z`);
+  if (Number.isNaN(day.getTime())) return false;
+  return day >= range.start && day <= range.end;
+}
+
+function resolveRequestRange(req) {
+  return (
+    parseDateRangeString(req.dateRange) ||
+    parseDateRangeString(req.from && req.to ? `${req.from} - ${req.to}` : '') ||
+    parseDateRangeString(req.from && req.to ? `${req.from} to ${req.to}` : '') ||
+    (req.date ? parseDateRangeString(`${req.date} to ${req.date}`) : null)
+  );
+}
+
+/**
+ * Block manual check-in when the employee has a pending WFH request covering today.
+ */
+async function assertNoPendingWfhForToday({ employeeId, company }) {
+  const eid = String(employeeId || '').trim();
+  if (!eid || !company) return;
+
+  const db = await getEmployeePortalDb(company);
+  const col = db.collection(ATTENDANCE_REQUESTS);
+  const today = todayYmdIst();
+
+  const requests = await col
+    .find({
+      employeeId: eid,
+      status: 'pending',
+      $or: [
+        { type: 'time-off' },
+        { type: { $in: ['wfh', 'WFH', 'work-from-home', 'work from home', 'on-duty'] } },
+      ],
+    })
+    .project({ type: 1, leaveType: 1, dateRange: 1, from: 1, to: 1, date: 1 })
+    .toArray();
+
+  const hasPendingWfh = requests.some((req) => {
+    const typeLower = String(req.type || '').trim().toLowerCase();
+    const isWfh =
+      isWfhLeaveType(req.leaveType) ||
+      typeLower === 'wfh' ||
+      typeLower === 'work-from-home' ||
+      typeLower === 'work from home' ||
+      typeLower === 'on-duty';
+    if (!isWfh) return false;
+    return dateInRange(today, resolveRequestRange(req));
+  });
+
+  if (hasPendingWfh) {
+    const err = new Error(
+      'Your Work From Home request for today is not approved yet. Please wait for HR approval before checking in.'
+    );
+    err.statusCode = 400;
+    throw err;
+  }
 }
 
 function localTodayYMD() {
@@ -342,6 +423,8 @@ async function checkinEmployee({ employeeId, company }) {
     err.statusCode = 400;
     throw err;
   }
+
+  await assertNoPendingWfhForToday({ employeeId, company });
 
   const col = await getCheckinsCollection(company);
   const today = todayYMD();
