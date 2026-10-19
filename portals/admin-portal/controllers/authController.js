@@ -11,7 +11,9 @@ const {
   OTP_TTL_MS,
 } = require('../../../lib/passwordResetOtp');
 
-const ALLOWED_EMAIL_DOMAINS = ['@thrivebrands.ai', '@ecosoulhome.com'];
+const ALLOWED_EMAIL_DOMAINS = ['@thrivebrands.ai', '@ecosoulhome.com', '@tathasstu.com'];
+const ALLOWED_EMAIL_DOMAIN_ERROR =
+  'Invalid email domain. Email must end with @thrivebrands.ai, @ecosoulhome.com, or @tathasstu.com';
 
 function isAllowedLoginEmail(email) {
   const emailLower = String(email || '').trim().toLowerCase();
@@ -145,7 +147,7 @@ async function login(req, res) {
     if (!isAllowedLoginEmail(email)) {
       return res.status(400).json({
         success: false,
-        error: 'Invalid email domain. Email must end with @thrivebrands.ai or @ecosoulhome.com'
+        error: ALLOWED_EMAIL_DOMAIN_ERROR
       });
     }
 
@@ -327,7 +329,7 @@ async function forgotPassword(req, res) {
     if (!isAllowedLoginEmail(email)) {
       return res.status(400).json({
         success: false,
-        error: 'Invalid email domain. Email must end with @thrivebrands.ai or @ecosoulhome.com',
+        error: ALLOWED_EMAIL_DOMAIN_ERROR,
       });
     }
 
@@ -395,7 +397,7 @@ async function resetPassword(req, res) {
     if (!isAllowedLoginEmail(email)) {
       return res.status(400).json({
         success: false,
-        error: 'Invalid email domain. Email must end with @thrivebrands.ai or @ecosoulhome.com',
+        error: ALLOWED_EMAIL_DOMAIN_ERROR,
       });
     }
 

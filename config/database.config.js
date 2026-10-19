@@ -124,7 +124,7 @@ function getMongoUri(databaseName = null) {
 function getCompanyFromEmail(email) {
   if (!email) return null;
   const emailLower = email.toLowerCase();
-  if (emailLower.endsWith('@thrivebrands.ai')) {
+  if (emailLower.endsWith('@thrivebrands.ai') || emailLower.endsWith('@tathasstu.com')) {
     return 'Thrive';
   } else if (emailLower.endsWith('@ecosoulhome.com')) {
     return 'Ecosoul Home';
