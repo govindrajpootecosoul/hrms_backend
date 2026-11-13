@@ -198,7 +198,8 @@ async function applyLeaveBalanceChange({
   const existing = await col.findOne({ company, employeeId }, { projection: { balances: 1 } });
   const prevBalances = { ...DEFAULT_LEAVE_BALANCES, ...(existing?.balances || {}) };
   const prevValue = safeInt(prevBalances[leaveKey], 0);
-  const nextValue = Math.max(0, safeInt(targetValue, 0));
+  // Allow negative remaining balances (overdraft after exhausted leave/WFH).
+  const nextValue = safeInt(targetValue, 0);
   const appliedDelta = nextValue - prevValue;
 
   const profileSet = {};
@@ -1668,7 +1669,7 @@ async function bulkAdjustLeaveBalances(req, res) {
       const existing = await col.findOne({ company, employeeId: emp.employeeId }, { projection: { balances: 1 } });
       const prevBalances = { ...DEFAULT_LEAVE_BALANCES, ...(existing?.balances || {}) };
       const prevValue = safeInt(prevBalances[leaveKey], 0);
-      const nextValue = Math.max(0, prevValue + inc);
+      const nextValue = prevValue + inc;
 
       const r = await applyLeaveBalanceChange({
         company,
